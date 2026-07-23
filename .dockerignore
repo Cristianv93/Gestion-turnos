@@ -1,0 +1,8 @@
+.git
+.DS_Store
+__pycache__
+*.py[cod]
+.env
+data/backups
+Directivas.md
+Orange_Vector_Color_Palette_generated.jpg
