@@ -9,7 +9,6 @@ COPY . /app
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PORT=53123 \
     HOST=0.0.0.0 \
     DATA_DIR=/app/data
 
