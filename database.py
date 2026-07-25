@@ -54,7 +54,7 @@ class Database:
 
     def authenticate(self, username, verify_password):
         with self.cursor() as (_, cur):
-            cur.execute("SELECT id, username, name, system_role, employee_id, password_hash FROM users WHERE lower(username) = lower(%s) AND active = TRUE", (username,))
+            cur.execute("SELECT id, username, name, system_role, employee_id, password_hash, must_change_password FROM users WHERE lower(username) = lower(%s) AND active = TRUE", (username,))
             row = cur.fetchone()
         if not row or not verify_password("", row["password_hash"]):
             # La comprobación real se realiza en login() para evitar exponer hashes.
@@ -63,7 +63,7 @@ class Database:
 
     def login_user(self, username):
         with self.cursor() as (_, cur):
-            cur.execute("SELECT id, username, name, system_role, employee_id, password_hash FROM users WHERE lower(username) = lower(%s) AND active = TRUE", (username,))
+            cur.execute("SELECT id, username, name, system_role, employee_id, password_hash, must_change_password FROM users WHERE lower(username) = lower(%s) AND active = TRUE", (username,))
             return cur.fetchone()
 
     def create_session(self, user_id, max_age):
@@ -81,7 +81,7 @@ class Database:
         digest = hashlib.sha256(token.encode()).hexdigest()
         with self.cursor() as (_, cur):
             cur.execute("""
-                SELECT u.id, u.username, u.name, u.system_role, u.employee_id
+                SELECT u.id, u.username, u.name, u.system_role, u.employee_id, u.must_change_password
                 FROM sessions s JOIN users u ON u.id = s.user_id
                 WHERE s.token_hash=%s AND s.revoked_at IS NULL AND s.expires_at > now() AND u.active=TRUE
             """, (digest,))
@@ -97,7 +97,7 @@ class Database:
 
     @staticmethod
     def user_dto(row):
-        return {"id": row["id"], "username": row["username"], "name": row["name"], "role": SYSTEM_TO_ROLE.get(row["system_role"], row["system_role"]), "employeeId": row["employee_id"]}
+        return {"id": row["id"], "username": row["username"], "name": row["name"], "role": SYSTEM_TO_ROLE.get(row["system_role"], row["system_role"]), "employeeId": row["employee_id"], "mustChangePassword": bool(row.get("must_change_password", False))}
 
     def _catalogs(self, cur):
         def objects(query):
@@ -139,10 +139,14 @@ class Database:
                     employee.update({**(r["legacy_data"] or {}),"phone":r["phone"],"habitualPositionTemplateId":r["habitual_position_template_id"],"francoCycle": {"anchorDate":r["anchor_date"].isoformat(),"anchorType":r["anchor_type"],"cycleLengthDays":r["cycle_length_days"]} if r["anchor_date"] else None})
                 employees.append(employee)
             if privileged:
-                cur.execute("SELECT id,username,name,system_role,employee_id FROM users WHERE active=TRUE ORDER BY username")
+                cur.execute("SELECT id,username,name,system_role,employee_id,active,must_change_password FROM users ORDER BY active DESC, username")
             else:
-                cur.execute("SELECT id,username,name,system_role,employee_id FROM users WHERE id=%s AND active=TRUE", (actor["id"],))
-            users=[self.user_dto(r) for r in cur.fetchall()]
+                cur.execute("SELECT id,username,name,system_role,employee_id,active,must_change_password FROM users WHERE id=%s AND active=TRUE", (actor["id"],))
+            user_rows = cur.fetchall()
+            users = [self.user_dto(r) for r in user_rows]
+            if privileged:
+                for item, row in zip(users, user_rows):
+                    item["active"] = bool(row["active"])
             cur.execute("SELECT * FROM planning_weeks ORDER BY start_date DESC")
             weeks=[self._week_dto(cur,w) for w in cur.fetchall()]
             if privileged:
@@ -163,6 +167,16 @@ class Database:
     def _assert_manager(self, actor):
         if actor.get("role") not in MANAGER_ROLES:
             raise DomainError("Tu perfil no puede modificar la planificación.", 403, "forbidden")
+
+    @staticmethod
+    def _assert_manageable_role(actor, target_system_role, desired_role=None):
+        """Evita que una encargada eleve permisos o administre cuentas jerárquicas."""
+        if actor.get("role") != "manager":
+            return
+        protected = {"sys-admin", "sys-encargada"}
+        desired_system_role = ROLE_TO_SYSTEM.get(desired_role, desired_role)
+        if target_system_role in protected or desired_system_role in protected:
+            raise DomainError("Una encargada solo puede gestionar accesos de supervisión y personal operativo.", 403, "roleBoundary")
 
     @staticmethod
     def _audit(cur, actor_id, action, entity_type, entity_id, result="ok", metadata=None):
@@ -200,10 +214,11 @@ class Database:
             floor_id = self._catalog_id(cur, "floors", data.get("piso"), "number") if data.get("piso") else None
             participates = company_role in {"Personal de camarería", "Personal de cocina", "Ayudante de cocina", "Personal franquero"}
             if user_id:
-                cur.execute("SELECT id,employee_id FROM users WHERE id=%s FOR UPDATE", (user_id,))
+                cur.execute("SELECT id,employee_id,system_role FROM users WHERE id=%s FOR UPDATE", (user_id,))
                 existing = cur.fetchone()
                 if not existing:
                     raise DomainError("El usuario no existe.", 404, "notFound")
+                self._assert_manageable_role(actor, existing["system_role"], role)
                 employee_id = existing["employee_id"] or str(data.get("employeeId") or "").strip() or secrets.token_hex(16)
                 cur.execute("SELECT id FROM users WHERE lower(username)=lower(%s) AND id<>%s", (username, user_id))
                 if cur.fetchone():
@@ -216,22 +231,28 @@ class Database:
                     cur.execute("""INSERT INTO employees (id,name,initials,company_role_id,sector_id,shift_id,floor_id,phone,participates_in_operation)
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""", (employee_id, name, "".join(part[0] for part in name.split()[:2]).upper(), company_role_id, sector_id, shift_id, floor_id, str(data.get("phone") or "").strip(), participates))
                 fields, values = ["username=%s", "name=%s", "system_role=%s", "employee_id=%s"], [username, name, ROLE_TO_SYSTEM[role], employee_id]
-                if password_hash:
-                    fields.append("password_hash=%s")
-                    values.append(password_hash)
                 values.append(user_id)
                 cur.execute(f"UPDATE users SET {','.join(fields)} WHERE id=%s", values)
-                self._audit(cur, actor["id"], "updated_user", "user", user_id, metadata={"employeeId": employee_id, "role": role})
+                self._audit(cur, actor["id"], "updated_user_profile", "user", user_id, metadata={"employeeId": employee_id, "role": role, "username": username})
             else:
+                self._assert_manageable_role(actor, None, role)
                 employee_id = str(data.get("employeeId") or "").strip() or secrets.token_hex(16)
                 cur.execute("SELECT id FROM users WHERE lower(username)=lower(%s)", (username,))
                 if cur.fetchone():
                     raise DomainError("Ese usuario ya existe.", 409, "duplicateUsername")
-                cur.execute("""INSERT INTO employees (id,name,initials,company_role_id,sector_id,shift_id,floor_id,phone,participates_in_operation)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""", (employee_id, name, "".join(part[0] for part in name.split()[:2]).upper(), company_role_id, sector_id, shift_id, floor_id, str(data.get("phone") or "").strip(), participates))
+                cur.execute("SELECT id FROM users WHERE employee_id=%s AND active=TRUE", (employee_id,))
+                if cur.fetchone():
+                    raise DomainError("Esa persona ya tiene un acceso activo.", 409, "duplicateEmployeeAccess")
+                cur.execute("SELECT id FROM employees WHERE id=%s FOR UPDATE", (employee_id,))
+                if cur.fetchone():
+                    cur.execute("""UPDATE employees SET name=%s,initials=%s,company_role_id=%s,sector_id=%s,shift_id=%s,floor_id=%s,phone=%s,
+                        participates_in_operation=%s,status='active' WHERE id=%s""", (name, "".join(part[0] for part in name.split()[:2]).upper(), company_role_id, sector_id, shift_id, floor_id, str(data.get("phone") or "").strip(), participates, employee_id))
+                else:
+                    cur.execute("""INSERT INTO employees (id,name,initials,company_role_id,sector_id,shift_id,floor_id,phone,participates_in_operation)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""", (employee_id, name, "".join(part[0] for part in name.split()[:2]).upper(), company_role_id, sector_id, shift_id, floor_id, str(data.get("phone") or "").strip(), participates))
                 user_id = secrets.token_hex(16)
                 cur.execute("INSERT INTO users (id,username,name,system_role,employee_id,password_hash) VALUES (%s,%s,%s,%s,%s,%s)", (user_id, username, name, ROLE_TO_SYSTEM[role], employee_id, password_hash))
-                self._audit(cur, actor["id"], "created_user", "user", user_id, metadata={"employeeId": employee_id, "role": role})
+                self._audit(cur, actor["id"], "created_user", "user", user_id, metadata={"employeeId": employee_id, "role": role, "username": username})
             conn.commit()
         return {"ok": True, "id": user_id, "employeeId": employee_id}
 
@@ -240,6 +261,11 @@ class Database:
         if user_id == actor.get("id"):
             raise DomainError("No podés desactivar tu propia sesión.", 409, "selfDeactivation")
         with self.cursor() as (conn, cur):
+            cur.execute("SELECT system_role FROM users WHERE id=%s FOR UPDATE", (user_id,))
+            target = cur.fetchone()
+            if not target:
+                raise DomainError("El usuario no existe o ya está desactivado.", 404, "notFound")
+            self._assert_manageable_role(actor, target["system_role"])
             cur.execute("UPDATE users SET active=FALSE WHERE id=%s AND active=TRUE RETURNING employee_id,username", (user_id,))
             row = cur.fetchone()
             if not row:
@@ -248,6 +274,60 @@ class Database:
             self._audit(cur, actor["id"], "deactivated_user", "user", user_id, metadata={"username": row["username"]})
             conn.commit()
         return {"ok": True, "id": user_id}
+
+    def reactivate_user(self, actor, user_id):
+        self._assert_manager(actor)
+        with self.cursor() as (conn, cur):
+            cur.execute("SELECT username,system_role FROM users WHERE id=%s FOR UPDATE", (user_id,))
+            target = cur.fetchone()
+            if not target:
+                raise DomainError("El usuario no existe.", 404, "notFound")
+            self._assert_manageable_role(actor, target["system_role"])
+            cur.execute("UPDATE users SET active=TRUE WHERE id=%s AND active=FALSE RETURNING username", (user_id,))
+            row = cur.fetchone()
+            if not row:
+                raise DomainError("El acceso ya está activo.", 409, "alreadyActive")
+            self._audit(cur, actor["id"], "reactivated_user", "user", user_id, metadata={"username": row["username"]})
+            conn.commit()
+        return {"ok": True, "id": user_id}
+
+    def reset_user_password(self, actor, user_id, new_password_hash, reason=""):
+        self._assert_manager(actor)
+        if user_id == actor.get("id"):
+            raise DomainError("Usá el cambio de contraseña personal para tu propia cuenta.", 409, "selfPasswordReset")
+        with self.cursor() as (conn, cur):
+            cur.execute("SELECT username,system_role FROM users WHERE id=%s AND active=TRUE FOR UPDATE", (user_id,))
+            target = cur.fetchone()
+            if not target:
+                raise DomainError("El usuario no existe o está desactivado.", 404, "notFound")
+            self._assert_manageable_role(actor, target["system_role"])
+            cur.execute("""UPDATE users
+                           SET password_hash=%s, must_change_password=TRUE,
+                               password_changed_at=now(), password_reset_at=now()
+                           WHERE id=%s""", (new_password_hash, user_id))
+            cur.execute("UPDATE sessions SET revoked_at=now() WHERE user_id=%s AND revoked_at IS NULL", (user_id,))
+            self._audit(cur, actor["id"], "reset_user_password", "user", user_id,
+                        metadata={"username": target["username"], "reason": reason.strip()[:240], "sessionsRevoked": True})
+            conn.commit()
+        return {"ok": True, "id": user_id, "mustChangePassword": True}
+
+    def change_own_password(self, actor, current_password, new_password_hash, verify_password, current_session_token):
+        with self.cursor() as (conn, cur):
+            cur.execute("SELECT password_hash FROM users WHERE id=%s AND active=TRUE FOR UPDATE", (actor["id"],))
+            target = cur.fetchone()
+            if not target:
+                raise DomainError("Tu usuario ya no está activo.", 403, "forbidden")
+            if not verify_password(current_password, target["password_hash"]):
+                raise DomainError("La contraseña actual no es correcta.", 401, "invalidCurrentPassword")
+            cur.execute("""UPDATE users
+                           SET password_hash=%s, must_change_password=FALSE,
+                               password_changed_at=now(), password_reset_at=NULL
+                           WHERE id=%s""", (new_password_hash, actor["id"]))
+            current_digest = hashlib.sha256(current_session_token.encode()).hexdigest() if current_session_token else ""
+            cur.execute("UPDATE sessions SET revoked_at=now() WHERE user_id=%s AND token_hash<>%s AND revoked_at IS NULL", (actor["id"], current_digest))
+            self._audit(cur, actor["id"], "changed_own_password", "user", actor["id"], metadata={"otherSessionsRevoked": True})
+            conn.commit()
+        return {"ok": True, "mustChangePassword": False}
 
     def assign(self, actor, week_id, position_id, employee_id, expected_version=None):
         self._assert_manager(actor)

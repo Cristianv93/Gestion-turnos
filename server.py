@@ -89,6 +89,13 @@ def verify_password(password, stored):
         return False
 
 
+def validate_new_password(password):
+    if not isinstance(password, str) or len(password) < 10:
+        raise DomainError("La contraseña debe tener al menos 10 caracteres.")
+    if len(password) > 256:
+        raise DomainError("La contraseña es demasiado extensa.")
+
+
 def read_state():
     return json.loads(DB_PATH.read_text(encoding="utf-8")) if DB_PATH.exists() else {}
 
@@ -230,16 +237,29 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
         jar = cookies.SimpleCookie(self.headers.get("Cookie"))
         token = jar.get(SESSION_COOKIE)
         if POSTGRES:
-            return POSTGRES.session_user(token.value if token else None)
+            try:
+                return POSTGRES.session_user(token.value if token else None)
+            except Exception:
+                LOGGER.exception("session_lookup_failed")
+                self._session_lookup_failed = True
+                return None
         session = SESSIONS.get(token.value) if token else None
         if session and datetime.now(timezone.utc).timestamp() - session["createdAt"] > SESSION_MAX_AGE_SECONDS:
             SESSIONS.pop(token.value, None)
             return None
         return session
 
+    def _session_token(self):
+        jar = cookies.SimpleCookie(self.headers.get("Cookie"))
+        token = jar.get(SESSION_COOKIE)
+        return token.value if token else ""
+
     def _require_session(self):
         session = self._session()
         if not session:
+            if getattr(self, "_session_lookup_failed", False):
+                self._send_json(503, {"error": "databaseUnavailable", "message": "No se pudo validar la sesión con PostgreSQL."})
+                return None
             log_event("authentication_required", path=self._path(), remote=self._client_ip())
             self._send_json(401, {"error": "authenticationRequired", "message": "Iniciá sesión para continuar."})
             return None
@@ -247,7 +267,7 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
         return session
 
     def _send_session(self, user):
-        session_user = {key: user.get(key) for key in ("id", "username", "name", "role", "employeeId")}
+        session_user = {key: user.get(key) for key in ("id", "username", "name", "role", "employeeId", "mustChangePassword")}
         token = POSTGRES.create_session(session_user["id"], SESSION_MAX_AGE_SECONDS) if POSTGRES else secrets.token_urlsafe(32)
         if not POSTGRES:
             SESSIONS[token] = {**session_user, "createdAt": datetime.now(timezone.utc).timestamp()}
@@ -280,6 +300,8 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
             session = self._require_session()
             if not session:
                 return
+            if session.get("mustChangePassword"):
+                return self._send_json(403, {"error": "passwordChangeRequired", "message": "Debés cambiar tu contraseña antes de continuar."})
             if POSTGRES:
                 try:
                     return self._send_json(200, POSTGRES.state(session))
@@ -301,6 +323,8 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
             session = self._require_session()
             if not session:
                 return
+            if session.get("mustChangePassword"):
+                return self._send_json(403, {"error": "passwordChangeRequired", "message": "Debés cambiar tu contraseña antes de continuar."})
             if not POSTGRES:
                 return self._send_json(503, {"error": "postgresRequired", "message": "PostgreSQL debe estar configurado."})
             try:
@@ -391,6 +415,8 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
             return
         if not self._require_mutation_protection():
             return
+        if session.get("mustChangePassword") and path != "/api/me/change-password":
+            return self._send_json(403, {"error": "passwordChangeRequired", "message": "Debés cambiar tu contraseña antes de continuar."})
         if POSTGRES:
             try:
                 body = self._read_json_body()
@@ -422,13 +448,26 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
                     return self._send_json(200, POSTGRES.mark_notifications_read(session, body.get("notificationId")))
                 if path == "/api/users":
                     password = str(body.get("password") or "")
+                    validate_new_password(password)
                     return self._send_json(201, POSTGRES.upsert_user(session, body, password_hash(password) if password else None))
+                if path == "/api/me/change-password":
+                    current_password = str(body.get("currentPassword") or "")
+                    new_password = str(body.get("newPassword") or "")
+                    validate_new_password(new_password)
+                    return self._send_json(200, POSTGRES.change_own_password(session, current_password, password_hash(new_password), verify_password, self._session_token()))
+                if path.startswith("/api/users/") and path.endswith("/reset-password"):
+                    new_password = str(body.get("newPassword") or "")
+                    validate_new_password(new_password)
+                    return self._send_json(200, POSTGRES.reset_user_password(session, path.split("/")[3], password_hash(new_password), str(body.get("reason") or "")))
                 if path.startswith("/api/users/") and path.endswith("/deactivate"):
                     return self._send_json(200, POSTGRES.deactivate_user(session, path.split("/")[3]))
-                if path.startswith("/api/users/"):
-                    password = str(body.get("password") or "")
+                if path.startswith("/api/users/") and path.endswith("/reactivate"):
+                    return self._send_json(200, POSTGRES.reactivate_user(session, path.split("/")[3]))
+                if path.startswith("/api/users/") and path.endswith("/profile"):
+                    if body.get("password"):
+                        raise DomainError("La contraseña se administra desde el restablecimiento de acceso.")
                     body["userId"] = path.split("/")[3]
-                    return self._send_json(200, POSTGRES.upsert_user(session, body, password_hash(password) if password else None))
+                    return self._send_json(200, POSTGRES.upsert_user(session, body))
             except DomainError as error:
                 log_event("domain_rejected", actor=session.get("id"), path=path, code=error.code, reason=error.message)
                 return self._send_json(error.status, {"error": error.code, "message": error.message})
