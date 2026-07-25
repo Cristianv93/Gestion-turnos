@@ -276,6 +276,7 @@ h1, h2, h3, .brand strong { font-family: "Manrope", sans-serif; }
 .planning-position-grid:not(.planning-days-off-grid) .planning-position-day > span { font-size: 18px; }
 .planning-position-assignment { display: flex; width: 100%; min-height: 0; height: 100%; flex-direction: column; justify-content: center; padding: 9px 10px; overflow: hidden; border-radius: 10px; box-shadow: none; }.planning-position-assignment.assigned { border-color: color-mix(in srgb, var(--uzumaki-orange-400) 34%, var(--uzumaki-cream-100)); background: color-mix(in srgb, var(--uzumaki-orange-400) 6%, white); }.planning-position-assignment.empty { align-items: center; border-color: color-mix(in srgb, var(--uzumaki-orange-400) 42%, var(--uzumaki-cream-100)); background: color-mix(in srgb, var(--uzumaki-bg) 44%, white); text-align: center; }.planning-position-assignment strong { font-size: 13px; }.planning-position-assignment small { font-size: 11px; }.planning-position-assignment:hover, .planning-position-assignment:focus-visible { box-shadow: 0 0 0 3px color-mix(in srgb, var(--uzumaki-orange-400) 12%, transparent); }.planning-empty-state { justify-content: center; margin-top: 0; }.planning-position-assignment.empty.optional-empty { border-color: color-mix(in srgb, var(--uzumaki-cream-200) 90%, white); background: color-mix(in srgb, var(--uzumaki-bg) 58%, white); }.planning-position-assignment.empty.critical-empty { border-color: color-mix(in srgb, #d45b5b 42%, var(--uzumaki-cream-100)); background: color-mix(in srgb, var(--rose-soft) 16%, white); }
 .planning-position-assignment.assigned { align-items: center; text-align: center; }.planning-position-assignment.assigned strong { max-width: 100%; overflow: hidden; font-size: 16px; line-height: 1.15; text-overflow: ellipsis; white-space: nowrap; }.planning-position-assignment.staff-view { align-items: center; text-align: center; }
+.planning-focus-summary, .planning-focus-control { display: flex; align-items: center; gap: 10px; margin: 0 0 12px; padding: 10px 13px; border: 1px solid color-mix(in srgb, var(--uzumaki-orange-400) 36%, var(--line)); border-radius: 9px; color: var(--uzumaki-brown-900); background: color-mix(in srgb, var(--uzumaki-orange-400) 8%, white); font-size: 12px; }.planning-focus-summary strong { color: var(--uzumaki-orange-900); }.planning-focus-summary span { color: var(--uzumaki-muted); }.planning-focus-control { width: fit-content; font-weight: 800; }.planning-focus-control select { min-height: 34px; max-width: 250px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; color: var(--uzumaki-brown-900); background: white; font: inherit; }.planning-position-day.is-today { box-shadow: inset 0 4px var(--uzumaki-orange-700); color: var(--uzumaki-orange-900); background: color-mix(in srgb, var(--uzumaki-orange-400) 16%, white); }.planning-position-cell.is-focused { background: color-mix(in srgb, var(--uzumaki-orange-400) 12%, white); }.planning-position-assignment.is-focused { position: relative; border: 3px solid var(--uzumaki-orange-800); color: var(--uzumaki-brown-900); background: color-mix(in srgb, var(--uzumaki-orange-400) 19%, white); box-shadow: 0 0 0 3px color-mix(in srgb, var(--uzumaki-orange-400) 18%, transparent); }.planning-position-assignment.is-focused:hover, .planning-position-assignment.is-focused:focus-visible { border-color: var(--uzumaki-orange-900); background: color-mix(in srgb, var(--uzumaki-orange-400) 24%, white); box-shadow: 0 0 0 4px color-mix(in srgb, var(--uzumaki-orange-400) 25%, transparent); }.planning-my-shift { display: inline-flex; width: fit-content; margin: 5px auto 0; padding: 2px 6px; border-radius: 999px; color: white; background: var(--uzumaki-orange-900); font-size: 10px; font-weight: 900; line-height: 1.1; }.planning-my-shift.exception { background: #9b5a12; }.planning-position-cell.has-focused-exception { box-shadow: inset 0 -4px #b66c17; }
 .planning-assignment-name--compact { display: none !important; }
 .planning-days-off-grid .planning-position-row-label { background: color-mix(in srgb, var(--blue-soft) 30%, white); }.planning-days-off-grid .planning-position-cell { background: color-mix(in srgb, var(--blue-soft) 13%, white); }.planning-day-off-button { min-height: 0; height: 100%; justify-content: center; border-radius: 10px; }.planning-day-off-button.empty { color: var(--uzumaki-muted); background: color-mix(in srgb, var(--blue-soft) 18%, white); }.planning-day-off-chip { min-height: 0; }
 .weekly-exceptions-panel { margin: 0 24px 24px; padding: 18px; border: 1px solid color-mix(in srgb, #477daf 22%, var(--uzumaki-cream-100)); border-radius: 13px; background: color-mix(in srgb, var(--blue-soft) 34%, white); }
@@ -320,7 +321,7 @@ h1, h2, h3, .brand strong { font-family: "Manrope", sans-serif; }
 .reference-sector-eyebrow { display: block; margin-bottom: 1px; color: var(--uzumaki-orange-800); font-size: 12px; font-weight: 800; letter-spacing: .11em; }.reference-sector-floors .reference-sector-eyebrow { color: var(--uzumaki-brown-800); }.reference-sector-head h2 { margin: 0; color: var(--uzumaki-brown-900); font-size: 21px; letter-spacing: -.02em; }.reference-sector-head p { margin: 2px 0 0; color: var(--uzumaki-muted); font-size: 12px; }
 .planning-position-sectors { min-width: 0; margin: 0; }
 .planning-position-sector, .planning-position-board { min-width: 0; }
-.planning-position-board { width: 100%; overflow-x: hidden; }
+.planning-position-board { width: 100%; overflow-x: auto; overscroll-behavior-inline: contain; }
 .planning-position-grid { width: 100%; min-width: 0; grid-template-columns: clamp(112px, 15vw, 180px) repeat(7, minmax(0, 1fr)); }
 .planning-position-corner, .planning-position-day, .planning-position-row-label, .planning-position-cell { min-width: 0; }
 
@@ -415,16 +416,20 @@ h1, h2, h3, .brand strong { font-family: "Manrope", sans-serif; }
 
 @media (max-width: 760px) {
   .planning-position-sectors { margin: 0; }
-  .planning-position-grid { grid-template-columns: 72px repeat(7, minmax(0, 1fr)); }
+  .planning-position-board { overflow-x: auto; overscroll-behavior-inline: contain; scroll-snap-type: x proximity; }
+  .planning-position-grid { width: max-content; min-width: 760px; grid-template-columns: 92px repeat(7, 95px); }
   .planning-position-corner, .planning-position-day { padding: 6px 2px; }
   .planning-position-row-label { padding: 7px 6px; }
   .planning-position-grid:not(.planning-days-off-grid) .planning-position-corner > strong,
   .planning-position-grid:not(.planning-days-off-grid) .planning-position-row-label > strong { font-size: 12px; }
-  .planning-position-grid:not(.planning-days-off-grid) .planning-position-day > span { font-size: 11px; }
-  .planning-position-day strong, .planning-position-row-label small { font-size: 10px; }
+  .planning-position-grid:not(.planning-days-off-grid) .planning-position-day > span { font-size: 12px; }
+  .planning-position-day strong, .planning-position-row-label small { font-size: 12px; }
   .planning-position-grid > .planning-position-cell { padding: 3px; }
   .planning-position-assignment { padding: 5px 2px; border-radius: 6px; }
-  .planning-position-assignment.assigned strong { font-size: 11px; }
+  .planning-position-cell, .planning-position-day { scroll-snap-align: start; }
+  .planning-position-assignment.assigned strong { font-size: 12px; }
+  .planning-focus-summary { align-items: flex-start; flex-direction: column; font-size: 12px; }
+  .planning-focus-control { width: 100%; justify-content: space-between; }.planning-focus-control select { max-width: 62%; }
 }
 .reference-board { overflow-x: auto; overscroll-behavior-inline: contain; background: white; }
 .reference-grid { display: grid; min-width: 1160px; grid-template-columns: 180px repeat(7, minmax(140px, 1fr)); }
@@ -566,16 +571,16 @@ h1, h2, h3, .brand strong { font-family: "Manrope", sans-serif; }
 
 @media (max-width: 760px) {
   .planning-position-sectors { margin: 0; }
-  .planning-position-board { overflow-x: hidden; }
-  .planning-position-grid { width: 100%; min-width: 0; grid-template-columns: 56px repeat(7, minmax(0, 1fr)); grid-template-rows: 42px 28px repeat(var(--morning-rows), 44px) 28px repeat(var(--afternoon-rows), 44px); }
+  .planning-position-board { overflow-x: auto; overscroll-behavior-inline: contain; scroll-snap-type: x proximity; }
+  .planning-position-grid { width: max-content; min-width: 760px; grid-template-columns: 92px repeat(7, 95px); grid-template-rows: 42px 28px repeat(var(--morning-rows), 44px) 28px repeat(var(--afternoon-rows), 44px); }
   .planning-days-off-grid { grid-template-rows: 42px 48px; }
   .planning-position-corner, .planning-position-day { min-height: 42px; padding: 4px 2px; }
-  .planning-position-row-label { padding: 5px 4px; }
+  .planning-position-row-label { padding: 5px 6px; }
   .planning-position-row-label { align-items: center; text-align: center; }
   .planning-position-grid:not(.planning-days-off-grid) .planning-position-corner > strong,
-  .planning-position-grid:not(.planning-days-off-grid) .planning-position-row-label > strong { font-size: 9px; line-height: 1.05; }
-  .planning-position-grid:not(.planning-days-off-grid) .planning-position-day > span { font-size: 9px; }
-  .planning-position-day strong, .planning-position-row-label small { font-size: 8px; line-height: 1.05; }
+  .planning-position-grid:not(.planning-days-off-grid) .planning-position-row-label > strong { font-size: 12px; line-height: 1.05; }
+  .planning-position-grid:not(.planning-days-off-grid) .planning-position-day > span { font-size: 12px; }
+  .planning-position-day strong, .planning-position-row-label small { font-size: 12px; line-height: 1.05; }
   .planning-shift-divider { min-height: 28px; padding: 0 8px; font-size: 10px; letter-spacing: .04em; }
   .planning-shift-divider > span { width: 18px; height: 18px; border-radius: 4px; font-size: 12px; }
   .planning-position-grid > .planning-position-cell { padding: 2px; }
@@ -585,7 +590,7 @@ h1, h2, h3, .brand strong { font-family: "Manrope", sans-serif; }
   .planning-exception-chip,
   .planning-position-assignment em { display: none !important; }
   .planning-assignment-name--compact { display: block !important; }
-  .planning-position-assignment.assigned strong { font-size: 9px; font-weight: 900; line-height: 1; white-space: normal; }
+  .planning-position-assignment.assigned strong { font-size: 12px; font-weight: 900; line-height: 1.05; white-space: normal; }
   .planning-empty-state { padding: 0; font-size: 7px; line-height: 1; }
   .planning-position-sector .reference-sector-head { min-height: 54px; padding: 9px 10px; }
   .planning-position-sector .reference-sector-icon { width: 30px; height: 30px; flex-basis: 30px; font-size: 14px; }
@@ -611,16 +616,16 @@ h1, h2, h3, .brand strong { font-family: "Manrope", sans-serif; }
   .planning-compact-actions .button { flex: 0 0 auto; min-height: 32px; }
   .planning-conflict-panel, .weekly-exceptions-panel { margin: 0 0 12px; }
   .planning-position-sectors { gap: 14px; margin: 0; }
-  .planning-position-board { overflow-x: hidden; }
-  .planning-position-grid { width: 100%; min-width: 0; grid-template-columns: 72px repeat(7, minmax(0, 1fr)); grid-template-rows: 38px 26px repeat(var(--morning-rows), 46px) 26px repeat(var(--afternoon-rows), 46px); }
+  .planning-position-board { overflow-x: auto; overscroll-behavior-inline: contain; scroll-snap-type: x proximity; }
+  .planning-position-grid { width: max-content; min-width: 760px; grid-template-columns: 92px repeat(7, 95px); grid-template-rows: 38px 26px repeat(var(--morning-rows), 46px) 26px repeat(var(--afternoon-rows), 46px); }
   .planning-days-off-grid { grid-template-rows: 38px 48px; }
   .planning-position-corner, .planning-position-day { min-height: 38px; padding: 4px 2px; }
   .planning-position-row-label { padding: 5px 5px; }
   .planning-position-row-label { align-items: center; text-align: center; }
   .planning-position-grid:not(.planning-days-off-grid) .planning-position-corner > strong,
-  .planning-position-grid:not(.planning-days-off-grid) .planning-position-row-label > strong { font-size: 10px; line-height: 1.05; }
-  .planning-position-grid:not(.planning-days-off-grid) .planning-position-day > span { font-size: 9px; }
-  .planning-position-day strong, .planning-position-row-label small { font-size: 8px; line-height: 1.05; }
+  .planning-position-grid:not(.planning-days-off-grid) .planning-position-row-label > strong { font-size: 12px; line-height: 1.05; }
+  .planning-position-grid:not(.planning-days-off-grid) .planning-position-day > span { font-size: 12px; }
+  .planning-position-day strong, .planning-position-row-label small { font-size: 12px; line-height: 1.05; }
   .planning-shift-divider { min-height: 26px; padding: 0 8px; font-size: 10px; letter-spacing: .04em; }
   .planning-shift-divider > span { width: 18px; height: 18px; border-radius: 4px; font-size: 12px; }
   .planning-position-grid > .planning-position-cell { padding: 2px; }
@@ -630,7 +635,7 @@ h1, h2, h3, .brand strong { font-family: "Manrope", sans-serif; }
   .planning-exception-chip,
   .planning-position-assignment em { display: none !important; }
   .planning-assignment-name--compact { display: block !important; }
-  .planning-position-assignment.assigned strong { font-size: 10px; font-weight: 900; line-height: 1.05; white-space: normal; }
+  .planning-position-assignment.assigned strong { font-size: 12px; font-weight: 900; line-height: 1.05; white-space: normal; }
   .planning-empty-state { padding: 0; font-size: 8px; line-height: 1; }
   .planning-position-sector .reference-sector-head { min-height: 48px; padding: 8px 10px; }
   .planning-position-sector .reference-sector-icon { width: 28px; height: 28px; flex-basis: 28px; font-size: 13px; }

@@ -28,6 +28,7 @@ let sidebarCollapsed = sessionStorage.getItem("uzumaki-sidebar-collapsed") === "
 let employeeSearch = "";
 let requestFilter = "all";
 let modalReturnFocus = null;
+let planningFocusedEmployeeId = null;
 
 const icons = {
   dashboard: "▦", schedule: "▤", employees: "♙", requests: "↔", notifications: "♢", audit: "◷", logout: "↪", plus: "+", menu: "☰",
@@ -636,17 +637,32 @@ function staffPublishedPlanningWeekPage(week) {
 
 function planningWeekStructure(week, conflicts, showExceptions = true, providedDaysOffSummary = null, simpleGridView = false) {
   const staffView = simpleGridView || !isAdminRole(user.role);
+  const focusedEmployeeId = user.role === "staff" ? user.employeeId : planningFocusedEmployeeId;
   const daysOffSummary = providedDaysOffSummary || buildDailyDaysOffSummary({
     employees: state.employees,
     week,
     availabilityMap: buildWeeklyAvailabilityMap(state.employees, week, { requests: state.requests }),
   });
-  return `<div class="planning-position-sectors ${staffView ? "planning-position-sectors--staff" : ""}" aria-label="Puestos operativos">
-    ${planningPositionSector(week, { sector: "Cocina", key: "kitchen", icon: "🍳", eyebrow: "SECTOR OPERATIVO" }, conflicts, showExceptions, staffView)}
+  return `${planningFocusToolbar(week, focusedEmployeeId, daysOffSummary)}<div class="planning-position-sectors ${staffView ? "planning-position-sectors--staff" : ""}" aria-label="Puestos operativos">
+    ${planningPositionSector(week, { sector: "Cocina", key: "kitchen", icon: "🍳", eyebrow: "SECTOR OPERATIVO" }, conflicts, showExceptions, staffView, focusedEmployeeId)}
     ${staffView ? "" : planningDaysOffSector(week, "Cocina", daysOffSummary, conflicts)}
-    ${planningPositionSector(week, { sector: "Pisos", key: "floors", icon: "🏥", eyebrow: "COBERTURA POR PISO" }, conflicts, showExceptions, staffView)}
+    ${planningPositionSector(week, { sector: "Pisos", key: "floors", icon: "🏥", eyebrow: "COBERTURA POR PISO" }, conflicts, showExceptions, staffView, focusedEmployeeId)}
     ${staffView ? "" : planningDaysOffSector(week, "Pisos", daysOffSummary, conflicts)}
   </div>`;
+}
+
+function planningFocusToolbar(week, focusedEmployeeId, daysOffSummary = {}) {
+  if (user.role === "staff") {
+    const turns = (week.assignments || []).filter((assignment) => assignment.employeeId === user.employeeId).length;
+    const daysOff = Object.values(daysOffSummary)
+      .flatMap((sectorDays) => Object.values(sectorDays).flat())
+      .filter((dayOff) => dayOff.employeeId === user.employeeId);
+    const offText = daysOff.length ? ` · ${daysOff.map((item) => `${formatIsoDate(item.date).slice(0, 5)} ${item.tipo || "Franco"}`).join(", ")}` : "";
+    return `<div class="planning-focus-summary"><strong>Mi semana · ${turns} turnos</strong><span>Mis asignaciones están resaltadas${offText}.</span></div>`;
+  }
+  if (user.role !== "supervisor") return "";
+  const options = state.employees.filter((employee) => employee.status === "active").map((employee) => `<option value="${employee.id}" ${focusedEmployeeId === employee.id ? "selected" : ""}>${escapeHtml(employee.name)}</option>`).join("");
+  return `<label class="planning-focus-control">Foco de empleado<select data-action="planning-focus-employee"><option value="">Vista operativa completa</option>${options}</select></label>`;
 }
 
 function weeklyExceptionsPanel(week, editable) {
@@ -714,7 +730,7 @@ function emptyPositionState(position, warnings) {
   return warnings.length ? "" : `<span class="planning-empty-state pending">Pendiente</span>`;
 }
 
-function planningPositionSector(week, section, conflicts, showExceptions = true, staffView = false) {
+function planningPositionSector(week, section, conflicts, showExceptions = true, staffView = false, focusedEmployeeId = null) {
   const positions = week.operationalPositions.filter((position) => position.sector === section.sector);
   const dates = [...new Set(positions.map((position) => position.date))];
   const rows = positions
@@ -737,20 +753,26 @@ function planningPositionSector(week, section, conflicts, showExceptions = true,
     const assignment = position ? week.assignments.find((item) => item.positionId === position.id) : null;
     const employee = assignment ? state.employees.find((item) => item.id === assignment.employeeId) : null;
     const warnings = !staffView && position ? conflicts.positionWarnings.get(position.id) || [] : [];
-    const exceptions = showExceptions && position ? positionExceptions(week, position.id) : [];
+    const allExceptions = position ? positionExceptions(week, position.id) : [];
+    const exceptions = showExceptions
+      ? allExceptions
+      : allExceptions.filter((exception) => exception.affectedEmployeeId === focusedEmployeeId || exception.coverEmployeeId === focusedEmployeeId);
     const emptyState = !employee && !staffView ? emptyPositionState(position, warnings) : "";
     const specialChip = planningSpecialChip(assignment, position, employee, showSpecialChips);
+    const isFocused = Boolean(employee && employee.id === focusedEmployeeId);
+    const hasFocusedException = exceptions.some((exception) => exception.affectedEmployeeId === focusedEmployeeId || exception.coverEmployeeId === focusedEmployeeId);
     const assignmentContent = employee
       ? staffView ? `<strong>${escapeHtml(employee.name)}</strong>` : `<strong>${escapeHtml(employee.name)}</strong><small>${escapeHtml(employee.role)}</small>${specialChip}`
       : emptyState;
-    return `<div class="planning-position-cell ${staffView ? "staff-view" : ""} ${index === dates.length - 1 ? "is-last-day" : ""} ${warnings.length ? "has-warning" : ""} ${exceptions.length ? "has-exception" : ""}"><button class="planning-position-assignment ${employee ? "assigned" : "empty"} ${staffView ? "staff-view" : ""} ${warnings.length ? "warning" : ""} ${exceptions.length ? "exception" : ""} ${!staffView && !employee && position?.sector === "Pisos" ? "critical-empty" : ""} ${!staffView && !employee && isOptionalPlanningPosition(position) ? "optional-empty" : ""}" type="button" ${editable && position ? `data-action="assign-planning-position" data-position-id="${position.id}"` : "disabled"} aria-label="${employee ? `Cambiar asignación de ${position.label}: ${employee.name}` : `Asignar empleado a ${position?.label || row.label}`}">${assignmentContent}${staffView ? "" : `${positionExceptionSummary(exceptions)}${warnings.length ? `<em>${warnings[0]}</em>` : ""}`}</button></div>`;
+    const focusLabel = isFocused ? "Mi turno" : hasFocusedException ? "Novedad" : "";
+    return `<div class="planning-position-cell ${staffView ? "staff-view" : ""} ${isFocused ? "is-focused" : ""} ${hasFocusedException ? "has-focused-exception" : ""} ${index === dates.length - 1 ? "is-last-day" : ""} ${warnings.length ? "has-warning" : ""} ${exceptions.length ? "has-exception" : ""}"><button class="planning-position-assignment ${employee ? "assigned" : "empty"} ${isFocused ? "is-focused" : ""} ${staffView ? "staff-view" : ""} ${warnings.length ? "warning" : ""} ${exceptions.length ? "exception" : ""} ${!staffView && !employee && position?.sector === "Pisos" ? "critical-empty" : ""} ${!staffView && !employee && isOptionalPlanningPosition(position) ? "optional-empty" : ""}" type="button" ${editable && position ? `data-action="assign-planning-position" data-position-id="${position.id}"` : "disabled"} aria-label="${employee ? `${isFocused ? "Mi turno. " : ""}Cambiar asignación de ${position.label}: ${employee.name}` : `Asignar empleado a ${position?.label || row.label}`}">${assignmentContent}${focusLabel ? `<span class="planning-my-shift ${hasFocusedException && !isFocused ? "exception" : ""}">${focusLabel}</span>` : ""}${staffView ? "" : `${positionExceptionSummary(exceptions)}${warnings.length ? `<em>${warnings[0]}</em>` : ""}`}</button></div>`;
     }).join("")}`;
   };
   return `<section class="planning-position-sector reference-sector reference-sector-${section.key}" aria-labelledby="planning-${section.key}-title">
     <header class="reference-sector-head"><span class="reference-sector-icon" aria-hidden="true">${section.icon}</span><div><span class="reference-sector-eyebrow">${section.eyebrow}</span><h2 id="planning-${section.key}-title">${section.sector}</h2>${section.description ? `<p>${section.description}</p>` : ""}</div></header>
     <div class="planning-position-board"><div class="planning-position-grid" style="--morning-rows:${rowsByShift["Mañana"].length};--afternoon-rows:${rowsByShift["Tarde"].length}">
       <div class="planning-position-corner"><span class="sr-only">Puesto</span>${staffView ? "" : `<small>${week.assignments.length} asignados</small>`}</div>
-      ${dates.map((date, index) => `<div class="planning-position-day ${index === dates.length - 1 ? "is-last-day" : ""}"><span>${dayNames[index]}</span><strong>${formatIsoDate(date).slice(0, 5)}</strong></div>`).join("")}
+      ${dates.map((date, index) => `<div class="planning-position-day ${date === new Date().toISOString().slice(0, 10) ? "is-today" : ""} ${index === dates.length - 1 ? "is-last-day" : ""}"><span>${dayNames[index]}</span><strong>${formatIsoDate(date).slice(0, 5)}</strong></div>`).join("")}
       ${shifts.map((shift) => `<div class="planning-shift-divider planning-shift-divider--${shift.modifier}"><span aria-hidden="true">${shift.icon}</span><strong>${shift.label}</strong></div>${rowsByShift[shift.value].map(rowMarkup).join("")}`).join("")}
     </div></div>
   </section>`;
@@ -1713,6 +1735,11 @@ document.addEventListener("input", (event) => {
 });
 
 document.addEventListener("change", (event) => {
+  if (event.target.matches('[data-action="planning-focus-employee"]')) {
+    planningFocusedEmployeeId = event.target.value || null;
+    render();
+    return;
+  }
   if (event.target.name === "planning-week-selection") {
     if (!canEditSchedule(user.role)) return;
     if (event.target.checked) selectedPlanningWeekIds.add(event.target.value);
