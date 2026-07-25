@@ -33,7 +33,7 @@ let modalReturnFocus = null;
 let planningFocusedEmployeeId = null;
 
 const icons = {
-  dashboard: "▦", schedule: "▤", employees: "♙", requests: "↔", notifications: "🔔", audit: "◷", logout: "↪", plus: "+", menu: "☰",
+  dashboard: "▦", schedule: "▤", employees: "♙", requests: "↔", notifications: '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg>', audit: "◷", logout: "↪", plus: "+", menu: "☰",
 };
 const statusText = {
   pending: "Pendiente",
@@ -134,7 +134,9 @@ function persistenceActions() {
 
 function render() {
   if (!user) return renderLogin();
-  const contentClass = page === "dashboard" ? "content dashboard-content" : "content";
+  // El resumen operativo tiene una grilla compacta de tres filas. El perfil del
+  // operario contiene más bloques y debe conservar su flujo vertical natural.
+  const contentClass = page === "dashboard" && isAdminRole(user.role) ? "content dashboard-content" : "content";
   app.innerHTML = `<div class="app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}">
     ${sidebar()}
     <div class="workspace">
@@ -636,12 +638,8 @@ function planningGoogleStat(label, value, meta) {
 function staffPublishedPlanningWeekPage(week) {
   const conflicts = detectPlanningConflicts(week);
   const showOperationalExceptions = isAdminRole(user.role);
-  return `${pageHeading("GRILLA PUBLICADA", week.name, `${formatIsoDate(week.startDate)} — ${formatIsoDate(week.endDate)}`)}
-    <section class="week-lifecycle-card week-published staff-published-week">
+  return `<section class="week-lifecycle-card week-published staff-published-week">
       <div class="week-lifecycle-head"><span class="week-state-icon">✓</span><div><span class="eyebrow">SOLO LECTURA</span><h2>${escapeHtml(week.name)}</h2><p>${formatIsoDate(week.startDate)} al ${formatIsoDate(week.endDate)} · Publicada ${formatDateTime(week.publishedAt)}</p></div><span class="week-status published">Publicada</span></div>
-      <div class="week-empty-canvas">
-        <span class="week-empty-symbol">▦</span><div><h3>Grilla semanal publicada</h3><p>Consultá tus turnos, francos y novedades de la semana.</p></div>
-      </div>
       ${showOperationalExceptions ? weeklyExceptionsPanel(week, canEditSchedule(user.role)) : ""}
       ${planningWeekStructure(week, conflicts, showOperationalExceptions)}
     </section>`;
