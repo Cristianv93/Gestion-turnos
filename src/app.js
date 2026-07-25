@@ -1,7 +1,7 @@
 import { authenticate, clearCachedState, csrfHeaders, endSession, hydrateStateFromJson, loadState, resetState, saveState, serializeState, STATE_FILE_NAME } from "./services/store.js?v=20260717-2";
 import { canEditApplications, canEditSchedule, canManageEmployees, canResolveRequests, canSeeAudit, isAdminRole, roleLabel } from "./services/permissions.js?v=20260712-3";
 import { createDraftPlanningWeek, ensureKitchenPlanningSlots } from "./services/planningWeeks.js?v=20260716-1";
-import { applyApprovedAbsenceOrLeave, applyApprovedShiftChange, applyGustavoJulioException, buildDailyDaysOffSummary, buildWeeklyAvailabilityMap, generateFloorCoverageAssignments, generateHabitualAssignments, generateKitchenMorningCollaborationAssignments, revokePlanningApplication } from "./services/planningEngine.js?v=20260717-6";
+import { applyApprovedAbsenceOrLeave, applyApprovedShiftChange, applyGustavoJulioException, buildDailyDaysOffSummary, buildWeeklyAvailabilityMap, generateFloorCoverageAssignments, generateHabitualAssignments, generateKitchenMorningCollaborationAssignments } from "./services/planningEngine.js?v=20260717-6";
 
 const SESSION_KEY = "uzumaki-user-v5";
 let user = JSON.parse(sessionStorage.getItem(SESSION_KEY) || "null");
@@ -85,6 +85,8 @@ const exceptionTypes = {
 function toast(message, tone = "success") {
   const node = document.createElement("div");
   node.className = `toast ${tone}`;
+  node.setAttribute("role", tone === "error" ? "alert" : "status");
+  node.setAttribute("aria-live", tone === "error" ? "assertive" : "polite");
   node.textContent = message;
   toastRegion.append(node);
   setTimeout(() => node.remove(), 3200);
@@ -164,7 +166,7 @@ function sidebar() {
     : [["dashboard", "Mi resumen"], ["schedule", "Mi semana"], ["requests", "Mis solicitudes"], ["notifications", "Notificaciones"]];
   return `<aside class="sidebar ${sidebarCollapsed ? "collapsed" : ""}" id="sidebar" aria-label="Navegación principal">
     <button class="brand" type="button" data-action="toggle-sidebar" aria-label="${sidebarCollapsed ? "Expandir menú" : "Contraer menú"}" title="${sidebarCollapsed ? "Expandir menú" : "Contraer menú"}"><span class="brand-mark"><img src="./assets/ICONO.webp" alt="" /></span><div><strong>Uzumaki</strong><small>Gestión operativa</small></div></button>
-    <nav>${items.map(([id, label]) => `<button class="nav-item ${page === id ? "active" : ""}" data-page="${id}" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}"><span class="nav-icon">${icons[id]}</span><span class="nav-label">${escapeHtml(label)}</span>${id === "notifications" && unreadCount() ? `<b>${unreadCount()}</b>` : ""}</button>`).join("")}</nav>
+    <nav>${items.map(([id, label]) => `<button class="nav-item ${page === id ? "active" : ""}" data-page="${id}" aria-label="${escapeHtml(label)}" ${page === id ? 'aria-current="page"' : ""} title="${escapeHtml(label)}"><span class="nav-icon">${icons[id]}</span><span class="nav-label">${escapeHtml(label)}</span>${id === "notifications" && unreadCount() ? `<b>${unreadCount()}</b>` : ""}</button>`).join("")}</nav>
     <button class="sidebar-foot user-session" type="button" data-action="confirm-logout" aria-label="Abrir opciones de sesión de ${escapeHtml(user.name)}"><span class="mini-avatar">${initials(user.name)}</span><span><strong>${escapeHtml(user.name)}</strong><small>${escapeHtml(roleLabel[user.role])}</small></span><span class="session-exit" aria-hidden="true">${icons.logout}</span></button>
   </aside>`;
 }
@@ -172,7 +174,7 @@ function sidebar() {
 function topbar() {
   const titles = { dashboard: isAdminRole(user.role) ? "Resumen operativo" : `Hola, ${user.name.split(" ")[0]}`, schedule: isAdminRole(user.role) ? "Grilla operativa" : "Mi semana", employees: "Personal", requests: isAdminRole(user.role) ? "Solicitudes" : "Mis solicitudes", notifications: "Notificaciones", audit: "Auditoría" };
   const weekLabel = state.planningWeek ? `${formatIsoDate(state.planningWeek.startDate)} — ${formatIsoDate(state.planningWeek.endDate)}` : "Semana sin crear";
-  return `<header class="topbar"><button class="mobile-menu" data-action="menu">${icons.menu}</button><div><span class="crumb">Uzumaki /</span><strong>${titles[page]}</strong></div><div class="top-actions"><button class="icon-button" data-page="notifications" aria-label="Notificaciones">♢${unreadCount() ? `<b>${unreadCount()}</b>` : ""}</button><span class="date-pill">${weekLabel}</span></div></header>`;
+  return `<header class="topbar"><button class="mobile-menu" data-action="menu" aria-label="Abrir menú de navegación">${icons.menu}</button><div><span class="crumb">Uzumaki /</span><strong>${titles[page]}</strong></div><div class="top-actions"><button class="icon-button" data-page="notifications" aria-label="Notificaciones">♢${unreadCount() ? `<b>${unreadCount()}</b>` : ""}</button><span class="date-pill">${weekLabel}</span></div></header>`;
 }
 
 function renderPage() {
@@ -203,7 +205,7 @@ function dashboardPage() {
 function operationalSnapshot() {
   const week = state.planningWeek;
   const dates = [...new Set((week?.operationalPositions || []).map((position) => position.date))].sort();
-  const date = dates.find((item) => item >= new Date().toISOString().slice(0, 10)) || dates[0];
+  const date = dates.find((item) => item >= localIsoDate()) || dates[0];
   const positions = (week?.operationalPositions || []).filter((position) => position.date === date && !isOptionalPlanningPosition(position));
   const assignments = new Set((week?.assignments || []).map((assignment) => assignment.positionId));
   const groups = [["Cocina", "Mañana"], ["Cocina", "Tarde"], ["Pisos", "Mañana"], ["Pisos", "Tarde"]];
@@ -732,7 +734,7 @@ function emptyPositionState(position, warnings) {
 
 function planningPositionSector(week, section, conflicts, showExceptions = true, staffView = false, focusedEmployeeId = null) {
   const positions = week.operationalPositions.filter((position) => position.sector === section.sector);
-  const dates = [...new Set(positions.map((position) => position.date))];
+  const dates = [...new Set(positions.map((position) => position.date))].sort();
   const rows = positions
     .filter((position) => position.dayIndex === 0)
     .sort((a, b) => a.shift.localeCompare(b.shift) || (a.slot || 0) - (b.slot || 0) || a.label.localeCompare(b.label));
@@ -764,15 +766,15 @@ function planningPositionSector(week, section, conflicts, showExceptions = true,
     const assignmentContent = employee
       ? staffView ? `<strong>${escapeHtml(employee.name)}</strong>` : `<strong>${escapeHtml(employee.name)}</strong><small>${escapeHtml(employee.role)}</small>${specialChip}`
       : emptyState;
-    const focusLabel = isFocused ? "Mi turno" : hasFocusedException ? "Novedad" : "";
-    return `<div class="planning-position-cell ${staffView ? "staff-view" : ""} ${isFocused ? "is-focused" : ""} ${hasFocusedException ? "has-focused-exception" : ""} ${index === dates.length - 1 ? "is-last-day" : ""} ${warnings.length ? "has-warning" : ""} ${exceptions.length ? "has-exception" : ""}"><button class="planning-position-assignment ${employee ? "assigned" : "empty"} ${isFocused ? "is-focused" : ""} ${staffView ? "staff-view" : ""} ${warnings.length ? "warning" : ""} ${exceptions.length ? "exception" : ""} ${!staffView && !employee && position?.sector === "Pisos" ? "critical-empty" : ""} ${!staffView && !employee && isOptionalPlanningPosition(position) ? "optional-empty" : ""}" type="button" ${editable && position ? `data-action="assign-planning-position" data-position-id="${position.id}"` : "disabled"} aria-label="${employee ? `${isFocused ? "Mi turno. " : ""}Cambiar asignación de ${position.label}: ${employee.name}` : `Asignar empleado a ${position?.label || row.label}`}">${assignmentContent}${focusLabel ? `<span class="planning-my-shift ${hasFocusedException && !isFocused ? "exception" : ""}">${focusLabel}</span>` : ""}${staffView ? "" : `${positionExceptionSummary(exceptions)}${warnings.length ? `<em>${warnings[0]}</em>` : ""}`}</button></div>`;
+    return `<div class="planning-position-cell ${staffView ? "staff-view" : ""} ${isFocused ? "is-focused" : ""} ${hasFocusedException ? "has-focused-exception" : ""} ${index === dates.length - 1 ? "is-last-day" : ""} ${warnings.length ? "has-warning" : ""} ${exceptions.length ? "has-exception" : ""}"><button class="planning-position-assignment ${employee ? "assigned" : "empty"} ${isFocused ? "is-focused" : ""} ${staffView ? "staff-view" : ""} ${warnings.length ? "warning" : ""} ${exceptions.length ? "exception" : ""} ${!staffView && !employee && position?.sector === "Pisos" ? "critical-empty" : ""} ${!staffView && !employee && isOptionalPlanningPosition(position) ? "optional-empty" : ""}" type="button" ${editable && position ? `data-action="assign-planning-position" data-position-id="${position.id}"` : "disabled"} aria-label="${employee ? `${isFocused ? "Mi turno. " : ""}Cambiar asignación de ${position.label}: ${employee.name}` : `Asignar empleado a ${position?.label || row.label}`}">${assignmentContent}${staffView ? "" : `${positionExceptionSummary(exceptions)}${warnings.length ? `<em>${warnings[0]}</em>` : ""}`}</button></div>`;
     }).join("")}`;
   };
   return `<section class="planning-position-sector reference-sector reference-sector-${section.key}" aria-labelledby="planning-${section.key}-title">
     <header class="reference-sector-head"><span class="reference-sector-icon" aria-hidden="true">${section.icon}</span><div><span class="reference-sector-eyebrow">${section.eyebrow}</span><h2 id="planning-${section.key}-title">${section.sector}</h2>${section.description ? `<p>${section.description}</p>` : ""}</div></header>
-    <div class="planning-position-board"><div class="planning-position-grid" style="--morning-rows:${rowsByShift["Mañana"].length};--afternoon-rows:${rowsByShift["Tarde"].length}">
+    <p class="planning-scroll-hint">Deslizá horizontalmente para recorrer los siete días.</p>
+    <div class="planning-position-board" tabindex="0" aria-label="Grilla semanal desplazable"><div class="planning-position-grid" style="--morning-rows:${rowsByShift["Mañana"].length};--afternoon-rows:${rowsByShift["Tarde"].length}">
       <div class="planning-position-corner"><span class="sr-only">Puesto</span>${staffView ? "" : `<small>${week.assignments.length} asignados</small>`}</div>
-      ${dates.map((date, index) => `<div class="planning-position-day ${date === new Date().toISOString().slice(0, 10) ? "is-today" : ""} ${index === dates.length - 1 ? "is-last-day" : ""}"><span>${dayNames[index]}</span><strong>${formatIsoDate(date).slice(0, 5)}</strong></div>`).join("")}
+      ${dates.map((date, index) => `<div class="planning-position-day ${date === localIsoDate() ? "is-today" : ""} ${index === dates.length - 1 ? "is-last-day" : ""}"><span>${dayNames[index]}</span><strong>${formatIsoDate(date).slice(0, 5)}</strong></div>`).join("")}
       ${shifts.map((shift) => `<div class="planning-shift-divider planning-shift-divider--${shift.modifier}"><span aria-hidden="true">${shift.icon}</span><strong>${shift.label}</strong></div>${rowsByShift[shift.value].map(rowMarkup).join("")}`).join("")}
     </div></div>
   </section>`;
@@ -1010,7 +1012,7 @@ async function deletePlanningWeek() {
   const week = state.planningWeek;
   if (!week || !canEditSchedule(user.role)) return;
   if (!confirm("¿Eliminar esta grilla? Se quitará también del historial almacenado.")) return;
-  try { await apiCommand(`/api/planning/weeks/${encodeURIComponent(week.id)}`, null, "DELETE"); planningView = "library"; toast("Grilla eliminada"); } catch (error) { toast(error.message, "error"); }
+  try { await apiCommand(`/api/planning/weeks/${encodeURIComponent(week.id)}`, null, "DELETE", { "If-Match": String(week.version) }); planningView = "library"; toast("Grilla eliminada"); } catch (error) { toast(error.message, "error"); }
 }
 
 function deleteSelectedPlanningWeeks() {
@@ -1090,7 +1092,7 @@ function employeesPage() {
   });
   const withAccess = state.users.filter((item) => item.employeeId).length;
   return `<section class="people-page">
-    <header class="people-page-header"><div><span class="eyebrow">DOTACIÓN</span><h1>Personal</h1><p>Directorio operativo, accesos y ubicación del equipo.</p></div><div class="people-page-actions"><span class="people-access-summary"><b>${withAccess}</b> accesos activos</span>${canManage ? `<span class="muted">Gestión de accesos en migración</span>` : ""}</div></header>
+    <header class="people-page-header"><div><span class="eyebrow">DOTACIÓN</span><h1>Personal</h1><p>Directorio operativo, accesos y ubicación del equipo.</p></div><div class="people-page-actions"><span class="people-access-summary"><b>${withAccess}</b> accesos activos</span>${canManage ? `<button class="button primary" data-action="new-user">${icons.plus} Nuevo acceso</button>` : ""}</div></header>
     <section class="people-toolbar"><label class="search"><span aria-hidden="true">⌕</span><input id="employee-search" placeholder="Buscar por nombre, rol, sector o turno…" value="${employeeSearch}" /></label><span class="people-result-count"><i></i>${rows.length} de ${state.employees.length} personas</span></section>
     ${usersAdminPanel(canManage, rows)}
   </section>`;
@@ -1113,7 +1115,10 @@ function userRows() {
 function usersAdminPanel(canManage, rows = userRows()) {
   return `<section class="people-table-panel"><div class="people-table-label"><div><strong>Directorio del equipo</strong><small>Gestioná los perfiles y accesos desde cada registro.</small></div><span>${rows.length} registros</span></div><div class="people-table-scroll"><table class="people-table"><thead><tr><th>Usuario</th><th>Persona</th><th>Rol empresa</th><th>Ubicación</th><th>Rol sistema</th><th>Gestión</th></tr></thead><tbody>${rows.map(({ user: rowUser, employee }) => {
       const rowId = rowUser?.id || employee?.id || "";
-      return `<tr><td>${rowUser ? `<strong>${escapeHtml(rowUser.username)}</strong>` : `<span class="muted">Sin usuario</span>`}</td><td><div class="person-cell"><span class="avatar">${escapeHtml(employee?.initials || initials(rowUser?.name || rowUser?.username || "?"))}</span><div><strong>${escapeHtml(employee?.name || rowUser?.name || "Sin persona")}</strong><small>${escapeHtml(employee?.phone || "Sin teléfono")}</small></div></div></td><td>${escapeHtml(employee?.role || "Sin rol laboral")}</td><td>${employeeAssignment(employee || {})}</td><td>${rowUser ? escapeHtml(roleLabel[rowUser.role] || rowUser.role) : `<span class="muted">Sin acceso</span>`}</td><td><span class="muted">Gestión por API en próxima fase</span></td></tr>`;
+      const actions = !canManage ? "" : rowUser
+        ? `<div class="table-actions"><button class="row-action" data-action="edit-user" data-id="${escapeHtml(rowUser.id)}">Editar</button><button class="row-action danger" data-action="delete-user" data-id="${escapeHtml(rowUser.id)}">Desactivar</button></div>`
+        : employee ? `<button class="row-action" data-action="create-user-for-employee" data-employee-id="${escapeHtml(employee.id)}">Crear acceso</button>` : "";
+      return `<tr><td>${rowUser ? `<strong>${escapeHtml(rowUser.username)}</strong>` : `<span class="muted">Sin usuario</span>`}</td><td><div class="person-cell"><span class="avatar">${escapeHtml(employee?.initials || initials(rowUser?.name || rowUser?.username || "?"))}</span><div><strong>${escapeHtml(employee?.name || rowUser?.name || "Sin persona")}</strong><small>${escapeHtml(employee?.phone || "Sin teléfono")}</small></div></div></td><td>${escapeHtml(employee?.role || "Sin rol laboral")}</td><td>${employeeAssignment(employee || {})}</td><td>${rowUser ? escapeHtml(roleLabel[rowUser.role] || rowUser.role) : `<span class="muted">Sin acceso</span>`}</td><td>${actions || `<span class="muted">Sin permisos</span>`}</td></tr>`;
     }).join("")}</tbody></table>${rows.length ? "" : empty("No encontramos usuarios con esa búsqueda")}</div></section>`;
 }
 
@@ -1163,28 +1168,30 @@ function auditPage() {
     <section class="table-card"><table><thead><tr><th>Fecha</th><th>Usuario</th><th>Acción</th><th>Elemento</th><th>Resultado</th></tr></thead><tbody>${state.auditLogs.map((a) => `<tr><td>${escapeHtml(a.time)}</td><td><strong>${escapeHtml(a.user)}</strong></td><td>${escapeHtml(a.action)}</td><td><span class="sector-pill">${escapeHtml(a.entity)}</span></td><td><span class="badge active">${escapeHtml(a.result)}</span></td></tr>`).join("")}</tbody></table></section>`;
 }
 
-function modal(content, variant = "") {
+function modal(content, variant = "", label = "Diálogo") {
   modalReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  document.body.insertAdjacentHTML("beforeend", `<div class="modal-backdrop ${variant ? `${variant}-backdrop` : ""}" data-action="close-modal"><section class="modal ${variant}" role="dialog" aria-modal="true">${content}</section></div>`);
+  document.body.classList.add("modal-open");
+  document.body.insertAdjacentHTML("beforeend", `<div class="modal-backdrop ${variant ? `${variant}-backdrop` : ""}" data-action="close-modal"><section class="modal ${variant}" role="dialog" aria-modal="true" aria-label="${escapeHtml(label)}">${content}</section></div>`);
   requestAnimationFrame(() => document.querySelector(".modal-backdrop .modal [autofocus], .modal-backdrop .modal button, .modal-backdrop .modal input")?.focus());
 }
 
 function closeModal() {
   document.querySelector(".modal-backdrop")?.remove();
+  document.body.classList.remove("modal-open");
   modalReturnFocus?.focus?.();
   modalReturnFocus = null;
 }
 
 function busyModal(title, message) {
-  modal(`<div class="busy-dialog" role="status" aria-live="assertive"><span class="spinner" aria-hidden="true"></span><div><h2>${escapeHtml(title)}</h2><p class="muted">${escapeHtml(message)}</p></div></div>`, "busy-modal");
+  modal(`<div class="busy-dialog" role="status" aria-live="assertive"><span class="spinner" aria-hidden="true"></span><div><h2>${escapeHtml(title)}</h2><p class="muted">${escapeHtml(message)}</p></div></div>`, "busy-modal", title);
 }
 
 function loginErrorModal(message) {
-  modal(`<span class="dialog-icon error" aria-hidden="true">!</span><span class="eyebrow">NO PUDIMOS INGRESAR</span><h2>Revisá tus datos</h2><p class="muted">${escapeHtml(message)}</p><div class="modal-actions"><button class="button primary" data-action="close-login-error" autofocus>Reintentar</button></div>`, "error-modal");
+  modal(`<span class="dialog-icon error" aria-hidden="true">!</span><span class="eyebrow">NO PUDIMOS INGRESAR</span><h2>Revisá tus datos</h2><p class="muted">${escapeHtml(message)}</p><div class="modal-actions"><button class="button primary" data-action="close-login-error" autofocus>Reintentar</button></div>`, "error-modal", "Error de inicio de sesión");
 }
 
 function logoutConfirmationModal() {
-  modal(`<span class="dialog-icon" aria-hidden="true">↪</span><span class="eyebrow">CERRAR SESIÓN</span><h2>¿Querés salir de Uzumaki?</h2><p class="muted">Tendrás que ingresar nuevamente para consultar la operación.</p><div class="modal-actions"><button type="button" class="button secondary" data-action="close-modal">Cancelar</button><button type="button" class="button danger-soft" data-action="perform-logout">Cerrar sesión</button></div>`, "confirm-modal");
+  modal(`<span class="dialog-icon" aria-hidden="true">↪</span><span class="eyebrow">CERRAR SESIÓN</span><h2>¿Querés salir de Uzumaki?</h2><p class="muted">Tendrás que ingresar nuevamente para consultar la operación.</p><div class="modal-actions"><button type="button" class="button secondary" data-action="close-modal">Cancelar</button><button type="button" class="button danger-soft" data-action="perform-logout">Cerrar sesión</button></div>`, "confirm-modal", "Confirmar cierre de sesión");
 }
 
 function clearClientSession() {
@@ -1462,6 +1469,7 @@ function systemRoleFor(role, participaEnOperacion) {
   return participaEnOperacion ? "Personal" : "Administrativo";
 }
 function formatIsoDate(value) { const [year, month, day] = value.split("-"); return `${day}/${month}/${year}`; }
+function localIsoDate(date = new Date()) { return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`; }
 function addIsoDays(value, amount) {
   const [year, month, day] = value.split("-").map(Number);
   const date = new Date(Date.UTC(year, month - 1, day + amount));
@@ -1560,36 +1568,12 @@ document.addEventListener("submit", async (event) => {
     const reason = data.get("reason").trim();
     if (!request || !canRevokeRequest(normalizedRequest)) return toast("No se puede revocar esta solicitud.", "error");
     if (!reason) return toast("Indicá un motivo de revocación.", "error");
-    if (!confirm("¿Confirmás la revocación? El sistema intentará revertir la grilla solo si es seguro.")) return;
-    const revokedBy = { id: user.id || user.username, name: user.name, role: user.role };
-    const revocation = revokePlanningApplication({
-      week: state.planningWeek,
-      request: normalizedRequest,
-      revokedBy,
-      reason,
-      now: () => new Date().toISOString(),
-    });
-    if (!revocation.ok) return toast(revocation.message, "error");
-    const revokedAt = revocation.trace?.revokedAt || new Date().toISOString();
-    request.status = "revoked";
-    request.revokedAt = revokedAt;
-    request.revokedBy = revokedBy;
-    request.revocationReason = reason;
-    request.revocationApplication = {
-      ...revocation.trace,
-      sourceRequestId: request.id,
-      revokedChangeType: normalizedRequest.type,
-      revokedBy,
-      revokedAt,
-      reason,
-      automatic: revocation.reverted,
-      requiresManualReview: revocation.requiresManualReview,
-      message: revocation.message,
-    };
-    audit("Revocó una solicitud aprobada", request.id, revocation.requiresManualReview ? "Revisión manual requerida" : "Reversión automática aplicada");
-    closeModal();
-    persist();
-    toast(revocation.requiresManualReview ? "No se pudo revertir automáticamente. Revisar la grilla manualmente." : "Solicitud revocada y grilla revertida");
+    if (!confirm("¿Confirmás la revocación? Las solicitudes aprobadas quedarán marcadas para revisión operativa.")) return;
+    try {
+      const result = await apiCommand(`/api/requests/${encodeURIComponent(request.id)}/revoke`, { reason });
+      closeModal();
+      toast(result.requiresManualReview ? "Solicitud revocada: revisá el impacto en la grilla." : "Solicitud revocada");
+    } catch (error) { toast(error.message, "error"); }
   }
   if (event.target.id === "planning-week-form") {
     if (!canEditSchedule(user.role)) return;
@@ -1671,52 +1655,12 @@ document.addEventListener("submit", async (event) => {
     const turno = data.get("turno");
     const participaEnOperacion = operationalCompanyRoles.includes(companyRole);
     if (!username || (!userId && !password) || !name || !role || !companyRole) return toast("Completá usuario, contraseña, nombre y roles.", "error");
-    if (state.users.some((item) => item.username === username && item.id !== userId)) return toast("Ese usuario ya existe.", "error");
-    const existingUser = userId ? state.users.find((item) => item.id === userId) : null;
-    let employee = employeeId ? state.employees.find((item) => item.id === employeeId) : null;
-    if (!employee) {
-      employee = {
-        id: uniqueId("emp", name, state.employees),
-        status: "active",
-        francos: [],
-        createdFromUser: username,
-      };
-      state.employees.push(employee);
-    }
-    Object.assign(employee, {
-      name,
-      initials: initials(name),
-      role: companyRole,
-      roleId: roleIdFor(companyRole),
-      sector: sector || null,
-      sectorId: sectorIdFor(sector),
-      turno: turno || null,
-      turnoId: turnoIdFor(turno),
-      piso: data.get("piso") ? Number(data.get("piso")) : null,
-      phone: data.get("phone").trim(),
-      status: employee.status || "active",
-      systemRole: systemRoleFor(companyRole, participaEnOperacion),
-      participaEnOperacion,
-      francos: Array.isArray(employee.francos) ? employee.francos : [],
-    });
-    const savedUser = existingUser || {
-      id: uniqueId("user", username, state.users),
-      employeeId: employee.id,
-    };
-    Object.assign(savedUser, {
-      username,
-      name,
-      role,
-      employeeId: employee.id,
-    });
-    if (password) savedUser.password = password;
-    if (!existingUser) state.users.push(savedUser);
-    if (userId && (savedUser.id === user.id || savedUser.username === user.username)) {
-      user = savedUser;
-      sessionStorage.setItem(SESSION_KEY, JSON.stringify(user));
-    }
-    audit(existingUser ? "Editó un usuario y sus datos laborales" : "Creó un usuario y sus datos laborales", username, `${roleLabel[role] || role} · ${companyRole}`);
-    closeModal(); persist(); toast(existingUser ? "Usuario actualizado en la base JSON" : "Usuario y datos laborales guardados en la base JSON");
+    try {
+      const payload = { username, password, name, systemRole: role, companyRole, sector, turno, piso: data.get("piso") || null, phone: data.get("phone").trim(), employeeId };
+      await apiCommand(userId ? `/api/users/${encodeURIComponent(userId)}` : "/api/users", payload);
+      closeModal();
+      toast(userId ? "Usuario actualizado" : "Usuario creado");
+    } catch (error) { toast(error.message, "error"); }
   }
 });
 
@@ -1798,8 +1742,16 @@ document.addEventListener("click", async (event) => {
   if (["export-state-json", "import-state-json", "toggle-schedule", "cycle-shift", "publish", "save-planning-week", "generate-planning-proposal", "reset-demo"].includes(action)) toast("Esta función está temporalmente deshabilitada mientras se migra al backend PostgreSQL.", "error");
   if (action === "new-request") newRequestModal();
   if (action === "view-request") requestDetailModal(button.dataset.id);
-  if (action === "open-revoke-request") toast("La revocación se habilitará cuando su API de PostgreSQL esté lista.", "error");
-  if (["new-user", "edit-user", "create-user-for-employee", "delete-user"].includes(action)) toast("La gestión de usuarios se habilitará cuando su API de PostgreSQL esté lista.", "error");
+  if (action === "open-revoke-request") revokeRequestModal(button.dataset.id);
+  if (action === "new-user") newUserModal();
+  if (action === "edit-user") editUserModal(button.dataset.id);
+  if (action === "create-user-for-employee") createUserForEmployeeModal(button.dataset.employeeId);
+  if (action === "delete-user") {
+    const targetUser = state.users.find((item) => item.id === button.dataset.id);
+    if (!targetUser) return toast("No se encontró el usuario.", "error");
+    if (!confirm(`¿Desactivar el acceso de ${targetUser.username}? Se conservará el historial.`)) return;
+    try { await apiCommand(`/api/users/${encodeURIComponent(targetUser.id)}/deactivate`, {}); toast("Acceso desactivado"); } catch (error) { toast(error.message, "error"); }
+  }
   if (action === "new-planning-week" && canEditSchedule(user.role)) newPlanningWeekModal();
   if (action === "open-planning-library") { planningView = "library"; render(); }
   if (action === "select-planning-date") { planningDateIndex = Number(button.dataset.dateIndex) || 0; render(); }

@@ -123,6 +123,7 @@ def migrate_passwords(payload):
 class UzumakiHandler(SimpleHTTPRequestHandler):
     def handle_one_request(self):
         self._request_started_at = perf_counter()
+        self._request_id = secrets.token_hex(8)
         return super().handle_one_request()
 
     def log_message(self, format, *args):
@@ -130,6 +131,7 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
         log_event("http_request", method=getattr(self, "command", None), path=self._path() if hasattr(self, "path") else None,
                   remote=self._client_ip(), status=args[1] if len(args) > 1 else None,
                   actor=getattr(self, "_actor_id", None),
+                  request_id=getattr(self, "_request_id", None),
                   duration_ms=round((perf_counter() - getattr(self, "_request_started_at", perf_counter())) * 1000, 1))
 
     def end_headers(self):
@@ -139,6 +141,7 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
         self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        self.send_header("X-Request-Id", getattr(self, "_request_id", "unknown"))
         self.send_header(
             "Content-Security-Policy",
             "default-src 'self'; "
@@ -412,8 +415,20 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
                 if path.startswith("/api/requests/") and path.endswith("/partner-response"):
                     request_id = path.split("/")[3]
                     return self._send_json(200, POSTGRES.resolve_partner_request(session, request_id, body.get("status")))
+                if path.startswith("/api/requests/") and path.endswith("/revoke"):
+                    request_id = path.split("/")[3]
+                    return self._send_json(200, POSTGRES.revoke_request(session, request_id, body.get("reason")))
                 if path == "/api/notifications/read":
                     return self._send_json(200, POSTGRES.mark_notifications_read(session, body.get("notificationId")))
+                if path == "/api/users":
+                    password = str(body.get("password") or "")
+                    return self._send_json(201, POSTGRES.upsert_user(session, body, password_hash(password) if password else None))
+                if path.startswith("/api/users/") and path.endswith("/deactivate"):
+                    return self._send_json(200, POSTGRES.deactivate_user(session, path.split("/")[3]))
+                if path.startswith("/api/users/"):
+                    password = str(body.get("password") or "")
+                    body["userId"] = path.split("/")[3]
+                    return self._send_json(200, POSTGRES.upsert_user(session, body, password_hash(password) if password else None))
             except DomainError as error:
                 log_event("domain_rejected", actor=session.get("id"), path=path, code=error.code, reason=error.message)
                 return self._send_json(error.status, {"error": error.code, "message": error.message})
@@ -442,7 +457,7 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
             if path.startswith("/api/planning/exceptions/"):
                 return self._send_json(200, POSTGRES.remove_exception(session, self.headers.get("X-Week-Id"), path.split("/")[4], expected_version))
             if path.startswith("/api/planning/weeks/"):
-                return self._send_json(200, POSTGRES.delete_week(session, path.split("/")[4]))
+                return self._send_json(200, POSTGRES.delete_week(session, path.split("/")[4], expected_version))
         except DomainError as error:
             log_event("domain_rejected", actor=session.get("id"), path=path, code=error.code, reason=error.message)
             return self._send_json(error.status, {"error": error.code, "message": error.message})
