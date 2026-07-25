@@ -803,9 +803,9 @@ function planningDaysOffSector(week, sector, daysOffSummary, conflicts) {
   const sectionId = `planning-days-off-${sector.toLowerCase()}`;
   const title = `FRANCOS ${sector.toUpperCase()}`;
   return `<section class="planning-position-sector reference-sector reference-sector-off" aria-labelledby="${sectionId}">
-    <header class="reference-sector-head"><span class="reference-sector-icon" aria-hidden="true">○</span><div><span class="reference-sector-eyebrow">DISPONIBILIDAD</span><h2 id="${sectionId}">${title}</h2><p>Francos manuales y F1/F2 calculados por ciclo.</p></div></header>
+    <header class="reference-sector-head"><span class="reference-sector-icon" aria-hidden="true">○</span><div><span class="reference-sector-eyebrow">DISPONIBILIDAD</span><h2 id="${sectionId}">${title}</h2><p>Francos manuales y F1/F2 calculados automáticamente.</p></div></header>
     <div class="planning-position-board"><div class="planning-position-grid planning-days-off-grid">
-      <div class="planning-position-corner"><strong>${title}</strong><small>Manual · Ciclo</small></div>
+      <div class="planning-position-corner"><strong>${title}</strong><small>Manual · F1/F2</small></div>
       ${dates.map((date, index) => `<div class="planning-position-day"><span>${dayNames[index]}</span><strong>${formatIsoDate(date).slice(0, 5)}</strong></div>`).join("")}
       <div class="planning-position-row-label"><strong>Personal de franco</strong><small>Manual prevalece</small></div>${dates.map((date) => planningDaysOffCell(week, sector, date, daysOffSummary?.[sector]?.[date] || [], editable, conflicts)).join("")}
     </div></div>
@@ -815,7 +815,10 @@ function planningDaysOffSector(week, sector, daysOffSummary, conflicts) {
 function planningDaysOffCell(week, sector, date, dayOffs, editable, conflicts) {
   return `<div class="planning-position-cell planning-days-off-cell"><button class="planning-day-off-button ${dayOffs.length ? "assigned" : "empty"}" type="button" ${editable ? `data-action="add-planning-day-off" data-sector="${sector}" data-date="${date}"` : "disabled"} aria-label="Cargar franco de ${sector} para ${formatIsoDate(date)}">${dayOffs.length ? dayOffs.map((dayOff) => {
     const warnings = dayOff.dayOffId ? conflicts.dayOffWarnings.get(dayOff.dayOffId) || [] : [];
-    return `<span class="planning-day-off-chip ${warnings.length ? "warning" : ""} ${dayOff.source === "calculatedCycle" ? "calculated" : "manual"}"><strong>${dayOff.name}</strong><small>${dayOff.type || "Franco"}${dayOff.source === "manualDayOff" ? " · Manual" : ""}</small>${warnings.length ? `<em>${warnings[0]}</em>` : ""}</span>`;
+    const type = dayOff.type || "Franco";
+    const sourceLabel = dayOff.source === "manualDayOff" ? "Manual" : "";
+    const meta = sourceLabel ? `${type} · ${sourceLabel}` : type;
+    return `<span class="planning-day-off-chip ${warnings.length ? "warning" : ""} ${dayOff.source === "calculatedCycle" ? "calculated" : "manual"}" title="${escapeHtml(dayOff.name)} · ${escapeHtml(meta)}"><strong>${escapeHtml(dayOff.name)}</strong><small>${escapeHtml(meta)}</small>${warnings.length ? `<em>${warnings[0]}</em>` : ""}</span>`;
   }).join("") : `<span>Sin francos</span>`}</button></div>`;
 }
 
