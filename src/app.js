@@ -1,4 +1,4 @@
-import { authenticate, endSession, hydrateStateFromJson, loadState, resetState, saveState, serializeState, STATE_FILE_NAME } from "./services/store.js?v=20260717-2";
+import { authenticate, clearCachedState, csrfHeaders, endSession, hydrateStateFromJson, loadState, resetState, saveState, serializeState, STATE_FILE_NAME } from "./services/store.js?v=20260717-2";
 import { canEditApplications, canEditSchedule, canManageEmployees, canResolveRequests, canSeeAudit, isAdminRole, roleLabel } from "./services/permissions.js?v=20260712-3";
 import { createDraftPlanningWeek, ensureKitchenPlanningSlots } from "./services/planningWeeks.js?v=20260716-1";
 import { applyApprovedAbsenceOrLeave, applyApprovedShiftChange, applyGustavoJulioException, buildDailyDaysOffSummary, buildWeeklyAvailabilityMap, generateFloorCoverageAssignments, generateHabitualAssignments, generateKitchenMorningCollaborationAssignments, revokePlanningApplication } from "./services/planningEngine.js?v=20260717-6";
@@ -27,6 +27,7 @@ let selectedPlanningWeekIds = new Set();
 let sidebarCollapsed = sessionStorage.getItem("uzumaki-sidebar-collapsed") === "true";
 let employeeSearch = "";
 let requestFilter = "all";
+let modalReturnFocus = null;
 
 const icons = {
   dashboard: "▦", schedule: "▤", employees: "♙", requests: "↔", notifications: "♢", audit: "◷", logout: "↪", plus: "+", menu: "☰",
@@ -110,7 +111,7 @@ async function persist(options = {}) {
 async function apiCommand(path, payload = null, method = "POST", extraHeaders = {}) {
   const response = await fetch(path, {
     method,
-    headers: { "Content-Type": "application/json", ...extraHeaders },
+    headers: { "Content-Type": "application/json", ...csrfHeaders(), ...extraHeaders },
     body: payload === null ? undefined : JSON.stringify(payload),
   });
   const result = await response.json();
@@ -121,7 +122,7 @@ async function apiCommand(path, payload = null, method = "POST", extraHeaders = 
 }
 
 function persistenceActions() {
-  return `<div class="heading-actions"><button class="button secondary" data-action="export-state-json">Exportar JSON</button>${canEditApplications(user.role) ? `<button class="button primary" data-action="import-state-json">Importar JSON</button>` : ""}</div>`;
+  return "";
 }
 
 function render() {
@@ -136,7 +137,7 @@ function render() {
   </div>`;
 }
 
-function renderLogin(error = "") {
+function renderLogin(error = "", username = "") {
   app.innerHTML = `<main class="login-page">
     <section class="login-brand">
       <div class="login-brand-header"><span class="brand-mark large"><img src="./assets/ICONO.webp" alt="" /></span><div><strong>UZUMAKI</strong><small>Gestión operativa</small></div></div>
@@ -146,8 +147,8 @@ function renderLogin(error = "") {
         <div class="mobile-logo"><span class="brand-mark"><img src="./assets/ICONO.webp" alt="" /></span><div><strong>Uzumaki</strong><small>Gestión operativa</small></div></div>
         <span class="eyebrow">BIENVENIDOS</span>
         <h2>Ingresá a tu espacio</h2>
-        ${error ? `<div class="form-error">${error}</div>` : ""}
-        <label>Usuario<input name="username" autocomplete="username" required autofocus /></label>
+        ${error ? `<div class="form-error">${escapeHtml(error)}</div>` : ""}
+        <label>Usuario<input name="username" value="${escapeHtml(username)}" autocomplete="username" required autofocus /></label>
         <label>Contraseña<div class="password-field"><input name="password" type="password" autocomplete="current-password" required /><button type="button" class="text-button" data-action="toggle-password">Ver</button></div></label>
         <button class="button primary wide" type="submit">Ingresar <span>→</span></button>
       </form>
@@ -163,7 +164,7 @@ function sidebar() {
   return `<aside class="sidebar ${sidebarCollapsed ? "collapsed" : ""}" id="sidebar" aria-label="Navegación principal">
     <button class="brand" type="button" data-action="toggle-sidebar" aria-label="${sidebarCollapsed ? "Expandir menú" : "Contraer menú"}" title="${sidebarCollapsed ? "Expandir menú" : "Contraer menú"}"><span class="brand-mark"><img src="./assets/ICONO.webp" alt="" /></span><div><strong>Uzumaki</strong><small>Gestión operativa</small></div></button>
     <nav>${items.map(([id, label]) => `<button class="nav-item ${page === id ? "active" : ""}" data-page="${id}" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}"><span class="nav-icon">${icons[id]}</span><span class="nav-label">${escapeHtml(label)}</span>${id === "notifications" && unreadCount() ? `<b>${unreadCount()}</b>` : ""}</button>`).join("")}</nav>
-    <div class="sidebar-foot"><div class="mini-avatar">${initials(user.name)}</div><div><strong>${escapeHtml(user.name)}</strong><small>${escapeHtml(roleLabel[user.role])}</small></div><button title="Cerrar sesión" data-action="logout" aria-label="Cerrar sesión">${icons.logout}</button></div>
+    <button class="sidebar-foot user-session" type="button" data-action="confirm-logout" aria-label="Abrir opciones de sesión de ${escapeHtml(user.name)}"><span class="mini-avatar">${initials(user.name)}</span><span><strong>${escapeHtml(user.name)}</strong><small>${escapeHtml(roleLabel[user.role])}</small></span><span class="session-exit" aria-hidden="true">${icons.logout}</span></button>
   </aside>`;
 }
 
@@ -444,8 +445,10 @@ function planningWeekStatusIcon(status) {
 }
 
 function planningWeekLifecycleActions(week) {
-  const saveButton = `<button class="button secondary planning-icon-action" data-action="save-planning-week" aria-label="Guardar grilla" title="Guardar grilla"><span aria-hidden="true">⌑</span></button>`;
-  const suggestButton = `<button class="button planning-proposal-action magic-pulse" data-action="generate-planning-proposal" title="Generar propuesta automática"><span aria-hidden="true">✦</span><span>Propuesta</span></button>`;
+  // La propuesta automática y el guardado integral se migrarán al backend.
+  // Se ocultan mientras PostgreSQL es la única fuente de escritura.
+  const saveButton = "";
+  const suggestButton = "";
   const exceptionButton = `<button class="button secondary planning-exception-action" data-action="new-week-exception">Excepción</button>`;
   const publishButton = `<button class="button primary planning-publish-action" data-action="publish-planning-week">${week.status === "paused" ? "Republicar" : "Publicar"}</button>`;
   const deleteButton = `<button class="button danger-soft planning-icon-action planning-delete-action" data-action="delete-planning-week" aria-label="Eliminar grilla" title="Eliminar grilla"><span aria-hidden="true">🗑</span></button>`;
@@ -1065,7 +1068,7 @@ function employeesPage() {
   });
   const withAccess = state.users.filter((item) => item.employeeId).length;
   return `<section class="people-page">
-    <header class="people-page-header"><div><span class="eyebrow">DOTACIÓN</span><h1>Personal</h1><p>Directorio operativo, accesos y ubicación del equipo.</p></div><div class="people-page-actions"><span class="people-access-summary"><b>${withAccess}</b> accesos activos</span>${canManage ? `<button class="button primary" data-action="new-user"><span aria-hidden="true">+</span> Agregar persona</button>` : ""}</div></header>
+    <header class="people-page-header"><div><span class="eyebrow">DOTACIÓN</span><h1>Personal</h1><p>Directorio operativo, accesos y ubicación del equipo.</p></div><div class="people-page-actions"><span class="people-access-summary"><b>${withAccess}</b> accesos activos</span>${canManage ? `<span class="muted">Gestión de accesos en migración</span>` : ""}</div></header>
     <section class="people-toolbar"><label class="search"><span aria-hidden="true">⌕</span><input id="employee-search" placeholder="Buscar por nombre, rol, sector o turno…" value="${employeeSearch}" /></label><span class="people-result-count"><i></i>${rows.length} de ${state.employees.length} personas</span></section>
     ${usersAdminPanel(canManage, rows)}
   </section>`;
@@ -1088,7 +1091,7 @@ function userRows() {
 function usersAdminPanel(canManage, rows = userRows()) {
   return `<section class="people-table-panel"><div class="people-table-label"><div><strong>Directorio del equipo</strong><small>Gestioná los perfiles y accesos desde cada registro.</small></div><span>${rows.length} registros</span></div><div class="people-table-scroll"><table class="people-table"><thead><tr><th>Usuario</th><th>Persona</th><th>Rol empresa</th><th>Ubicación</th><th>Rol sistema</th><th>Gestión</th></tr></thead><tbody>${rows.map(({ user: rowUser, employee }) => {
       const rowId = rowUser?.id || employee?.id || "";
-      return `<tr><td>${rowUser ? `<strong>${escapeHtml(rowUser.username)}</strong>` : `<span class="muted">Sin usuario</span>`}</td><td><div class="person-cell"><span class="avatar">${escapeHtml(employee?.initials || initials(rowUser?.name || rowUser?.username || "?"))}</span><div><strong>${escapeHtml(employee?.name || rowUser?.name || "Sin persona")}</strong><small>${escapeHtml(employee?.phone || "Sin teléfono")}</small></div></div></td><td>${escapeHtml(employee?.role || "Sin rol laboral")}</td><td>${employeeAssignment(employee || {})}</td><td>${rowUser ? escapeHtml(roleLabel[rowUser.role] || rowUser.role) : `<span class="muted">Sin acceso</span>`}</td><td>${canManage ? `<div class="row-actions">${rowUser ? `<button class="row-action" data-action="edit-user" data-id="${rowId}">Editar</button><button class="row-action danger" data-action="delete-user" data-id="${rowId}">Eliminar</button>` : `<button class="row-action" data-action="create-user-for-employee" data-id="${rowId}">Crear acceso</button>`}</div>` : `<span class="muted">Solo lectura</span>`}</td></tr>`;
+      return `<tr><td>${rowUser ? `<strong>${escapeHtml(rowUser.username)}</strong>` : `<span class="muted">Sin usuario</span>`}</td><td><div class="person-cell"><span class="avatar">${escapeHtml(employee?.initials || initials(rowUser?.name || rowUser?.username || "?"))}</span><div><strong>${escapeHtml(employee?.name || rowUser?.name || "Sin persona")}</strong><small>${escapeHtml(employee?.phone || "Sin teléfono")}</small></div></div></td><td>${escapeHtml(employee?.role || "Sin rol laboral")}</td><td>${employeeAssignment(employee || {})}</td><td>${rowUser ? escapeHtml(roleLabel[rowUser.role] || rowUser.role) : `<span class="muted">Sin acceso</span>`}</td><td><span class="muted">Gestión por API en próxima fase</span></td></tr>`;
     }).join("")}</tbody></table>${rows.length ? "" : empty("No encontramos usuarios con esa búsqueda")}</div></section>`;
 }
 
@@ -1135,12 +1138,36 @@ function notificationsPage() {
 function auditPage() {
   if (!canSeeAudit(user.role)) return dashboardPage();
   return `${pageHeading("TRAZABILIDAD", "Auditoría", "Registro de las acciones relevantes del sistema.")}
-    <section class="table-card"><table><thead><tr><th>Fecha</th><th>Usuario</th><th>Acción</th><th>Elemento</th><th>Resultado</th></tr></thead><tbody>${state.auditLogs.map((a) => `<tr><td>${escapeHtml(a.time)}</td><td><strong>${escapeHtml(a.user)}</strong></td><td>${escapeHtml(a.action)}</td><td><span class="sector-pill">${escapeHtml(a.entity)}</span></td><td><span class="badge active">${escapeHtml(a.result)}</span></td></tr>`).join("")}</tbody></table></section>
-    <button class="reset-link" data-action="reset-demo">Restablecer datos iniciales</button>`;
+    <section class="table-card"><table><thead><tr><th>Fecha</th><th>Usuario</th><th>Acción</th><th>Elemento</th><th>Resultado</th></tr></thead><tbody>${state.auditLogs.map((a) => `<tr><td>${escapeHtml(a.time)}</td><td><strong>${escapeHtml(a.user)}</strong></td><td>${escapeHtml(a.action)}</td><td><span class="sector-pill">${escapeHtml(a.entity)}</span></td><td><span class="badge active">${escapeHtml(a.result)}</span></td></tr>`).join("")}</tbody></table></section>`;
 }
 
 function modal(content, variant = "") {
+  modalReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   document.body.insertAdjacentHTML("beforeend", `<div class="modal-backdrop ${variant ? `${variant}-backdrop` : ""}" data-action="close-modal"><section class="modal ${variant}" role="dialog" aria-modal="true">${content}</section></div>`);
+  requestAnimationFrame(() => document.querySelector(".modal-backdrop .modal [autofocus], .modal-backdrop .modal button, .modal-backdrop .modal input")?.focus());
+}
+
+function closeModal() {
+  document.querySelector(".modal-backdrop")?.remove();
+  modalReturnFocus?.focus?.();
+  modalReturnFocus = null;
+}
+
+function busyModal(title, message) {
+  modal(`<div class="busy-dialog" role="status" aria-live="assertive"><span class="spinner" aria-hidden="true"></span><div><h2>${escapeHtml(title)}</h2><p class="muted">${escapeHtml(message)}</p></div></div>`, "busy-modal");
+}
+
+function loginErrorModal(message) {
+  modal(`<span class="dialog-icon error" aria-hidden="true">!</span><span class="eyebrow">NO PUDIMOS INGRESAR</span><h2>Revisá tus datos</h2><p class="muted">${escapeHtml(message)}</p><div class="modal-actions"><button class="button primary" data-action="close-login-error" autofocus>Reintentar</button></div>`, "error-modal");
+}
+
+function logoutConfirmationModal() {
+  modal(`<span class="dialog-icon" aria-hidden="true">↪</span><span class="eyebrow">CERRAR SESIÓN</span><h2>¿Querés salir de Uzumaki?</h2><p class="muted">Tendrás que ingresar nuevamente para consultar la operación.</p><div class="modal-actions"><button type="button" class="button secondary" data-action="close-modal">Cancelar</button><button type="button" class="button danger-soft" data-action="perform-logout">Cerrar sesión</button></div>`, "confirm-modal");
+}
+
+function clearClientSession() {
+  clearCachedState();
+  [SESSION_KEY, "uzumaki-user-v4", "uzumaki-user-v3", "uzumaki-user-v2", "uzumaki-user", "turnia-user"].forEach((key) => sessionStorage.removeItem(key));
 }
 
 function exportStateJson() {
@@ -1219,9 +1246,7 @@ function requestDetailModal(requestId) {
   const managerActions = canManagerResolveRequest(request)
     ? `<button class="button danger-soft" data-action="resolve" data-id="${request.id}" data-status="rejected">Rechazar</button><button class="button primary" data-action="resolve" data-id="${request.id}" data-status="approved">Aprobar</button>`
     : "";
-  const revokeAction = canRevokeRequest(request)
-    ? `<button class="button danger-soft" data-action="open-revoke-request" data-id="${request.id}">Revocar aprobación</button>`
-    : "";
+  const revokeAction = "";
   modal(`<button class="modal-close" data-action="close-modal">×</button><span class="eyebrow">SOLICITUD</span><h2>${escapeHtml(request.id)}</h2><p class="muted">Detalle completo para revisión. Las licencias y ausencias aprobadas se aplican automáticamente con el reemplazo elegido.</p><div class="request-meta request-detail">${rows.map(([label, value]) => `<span><small>${escapeHtml(label)}</small><strong>${escapeHtml(value)}</strong></span>`).join("")}</div>${requestImpactPreview(request)}<div class="modal-actions"><button type="button" class="button secondary" data-action="close-modal">Cerrar</button>${partnerActions}${managerActions}${revokeAction}</div>`);
 }
 
@@ -1375,7 +1400,6 @@ function updateExceptionAffectedEmployee(form) {
   affectedSelect.value = assignment?.employeeId || "unassigned";
 }
 
-function closeModal() { document.querySelector(".modal-backdrop")?.remove(); }
 function initials(name) { return name.split(" ").map((p) => p[0]).slice(0, 2).join("").toUpperCase(); }
 function slugify(value) { return String(value).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, ""); }
 function uniqueId(prefix, seed, collection) {
@@ -1461,11 +1485,19 @@ document.addEventListener("submit", async (event) => {
   if (event.target.id === "login-form") {
     const data = new FormData(event.target);
     const username = data.get("username").trim().toLowerCase();
+    const submit = event.target.querySelector('button[type="submit"]');
+    submit.disabled = true;
+    event.target.querySelectorAll("input").forEach((input) => { input.disabled = true; });
+    busyModal("Ingresando", "Estamos validando tu acceso.");
     try {
       const match = await authenticate(username, data.get("password"));
+      closeModal();
       return loginAsDemoUser(match);
     } catch (error) {
-      return renderLogin(error.message || "Usuario o contraseña incorrectos.");
+      closeModal();
+      renderLogin("", username);
+      loginErrorModal(error.message || "Usuario o contraseña incorrectos.");
+      return undefined;
     }
   }
   if (event.target.id === "request-form") {
@@ -1719,19 +1751,28 @@ document.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-action]"); if (!button) return;
   const action = button.dataset.action;
   if (action === "toggle-password") { const input = document.querySelector('input[name="password"]'); input.type = input.type === "password" ? "text" : "password"; button.textContent = input.type === "password" ? "Ver" : "Ocultar"; }
-  if (action === "logout") { endSession(); user = null; sessionStorage.removeItem(SESSION_KEY); sessionStorage.removeItem("uzumaki-user-v4"); sessionStorage.removeItem("uzumaki-user-v3"); sessionStorage.removeItem("uzumaki-user-v2"); sessionStorage.removeItem("uzumaki-user"); sessionStorage.removeItem("turnia-user"); render(); }
+  if (action === "confirm-logout" || action === "logout") logoutConfirmationModal();
+  if (action === "close-login-error") { closeModal(); document.querySelector('input[name="password"]')?.focus(); }
+  if (action === "perform-logout") {
+    closeModal();
+    busyModal("Cerrando sesión", "Estamos protegiendo tu sesión.");
+    try {
+      await endSession();
+      user = null;
+      clearClientSession();
+      closeModal();
+      renderLogin();
+    } catch (error) {
+      closeModal();
+      toast(error.message || "No se pudo cerrar la sesión.", "error");
+    }
+  }
   if (action === "menu") document.querySelector("#sidebar")?.classList.toggle("open");
-  if (action === "export-state-json") exportStateJson();
-  if (action === "import-state-json") importStateJson();
-  if (action === "toggle-schedule") { scheduleMode = scheduleMode === "official" ? "draft" : "official"; render(); }
-  if (action === "cycle-shift") { const item = state.draft.find((s) => s.id === button.dataset.id); const states = ["working", "off", "sick", "leave"]; item.state = states[(states.indexOf(item.state) + 1) % states.length]; state.hasDraftChanges = true; persist(); }
-  if (action === "publish") { state.schedule = structuredClone(state.draft); state.scheduleVersion += 1; state.hasDraftChanges = false; state.notifications.unshift({ id: crypto.randomUUID(), title: "Nueva grilla publicada", text: `La versión ${state.scheduleVersion} ya está disponible.`, time: "Ahora", type: "schedule", read: false }); audit("Publicó la grilla", `Semana 49 · v${state.scheduleVersion}`, "Publicada"); scheduleMode = "official"; persist(); toast(`Grilla versión ${state.scheduleVersion} publicada`); }
+  if (["export-state-json", "import-state-json", "toggle-schedule", "cycle-shift", "publish", "save-planning-week", "generate-planning-proposal", "reset-demo"].includes(action)) toast("Esta función está temporalmente deshabilitada mientras se migra al backend PostgreSQL.", "error");
   if (action === "new-request") newRequestModal();
   if (action === "view-request") requestDetailModal(button.dataset.id);
-  if (action === "open-revoke-request") revokeRequestModal(button.dataset.id);
-  if (action === "new-user") newUserModal();
-  if (action === "edit-user") editUserModal(button.dataset.id);
-  if (action === "create-user-for-employee") createUserForEmployeeModal(button.dataset.id);
+  if (action === "open-revoke-request") toast("La revocación se habilitará cuando su API de PostgreSQL esté lista.", "error");
+  if (["new-user", "edit-user", "create-user-for-employee", "delete-user"].includes(action)) toast("La gestión de usuarios se habilitará cuando su API de PostgreSQL esté lista.", "error");
   if (action === "new-planning-week" && canEditSchedule(user.role)) newPlanningWeekModal();
   if (action === "open-planning-library") { planningView = "library"; render(); }
   if (action === "select-planning-date") { planningDateIndex = Number(button.dataset.dateIndex) || 0; render(); }
@@ -1767,8 +1808,6 @@ document.addEventListener("click", async (event) => {
       toast("Excepción eliminada");
     } catch (error) { toast(error.message, "error"); }
   }
-  if (action === "save-planning-week") savePlanningWeekToJson();
-  if (action === "generate-planning-proposal") generatePlanningProposal();
   if (action === "publish-planning-week") publishPlanningWeek();
   if (action === "pause-planning-week") pausePlanningWeek();
   if (action === "draft-planning-week") draftPlanningWeek();
@@ -1827,7 +1866,7 @@ document.addEventListener("click", async (event) => {
     audit(`${request.status === "approved" ? "Aprobó" : "Rechazó"} una solicitud`, request.id, statusText[request.status]);
     closeModal(); persist(); toast(`Solicitud ${statusText[request.status].toLowerCase()}`);
   }
-  if (action === "delete-user") {
+  if (action === "disabled-delete-user") {
     if (!canManageEmployees(user.role)) return toast("Solo una encargada puede eliminar usuarios.", "error");
     const targetUser = state.users.find((item) => item.id === button.dataset.id);
     if (!targetUser) return toast("No se encontró el usuario.", "error");
@@ -1843,7 +1882,23 @@ document.addEventListener("click", async (event) => {
   if (action === "toggle-employee") toast("Usá editar o eliminar usuario para modificar la base JSON.", "error");
   if (action === "read-notification") { try { await apiCommand("/api/notifications/read", { notificationId: button.dataset.id }); } catch (error) { toast(error.message, "error"); } }
   if (action === "read-all") { try { await apiCommand("/api/notifications/read", {}); toast("Notificaciones marcadas como leídas"); } catch (error) { toast(error.message, "error"); } }
-  if (action === "reset-demo") { state = resetState(state.stateRevision); persist(); toast("Datos iniciales restablecidos"); }
+});
+
+document.addEventListener("keydown", (event) => {
+  const backdrop = document.querySelector(".modal-backdrop");
+  if (!backdrop) return;
+  if (event.key === "Escape" && !backdrop.classList.contains("busy-modal-backdrop")) {
+    event.preventDefault();
+    closeModal();
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const focusable = [...backdrop.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')];
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable.at(-1);
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+  if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
 });
 
 render();

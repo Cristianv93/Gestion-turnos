@@ -43,9 +43,14 @@ class Database:
 
     @contextmanager
     def cursor(self):
-        with psycopg.connect(self.url, row_factory=dict_row) as conn:
+        with psycopg.connect(self.url, row_factory=dict_row, connect_timeout=5) as conn:
             with conn.cursor() as cur:
                 yield conn, cur
+
+    def ready(self):
+        with self.cursor() as (_, cur):
+            cur.execute("SELECT 1")
+            return bool(cur.fetchone())
 
     def authenticate(self, username, verify_password):
         with self.cursor() as (_, cur):
@@ -119,25 +124,37 @@ class Database:
         exceptions = [{"id": r["id"], "positionId": r["position_id"], "date": r["date"].isoformat(), "shift": r["shift"], "sector": r["sector"], "affectedEmployeeId": r["affected_employee_id"], "coverEmployeeId": r["cover_employee_id"], "type": r["type"], "status": r["status"], "note": r["note"], **(r["metadata"] or {})} for r in cur.fetchall()]
         return {"id": week["id"], "name": week["name"], "startDate": week["start_date"].isoformat(), "endDate": week["end_date"].isoformat(), "status": week["status"], "version": week["version"], "publishedAt": iso(week["published_at"]), "operationalPositions": positions, "assignments": assignments, "daysOff": days_off, "exceptions": exceptions, "coverages": []}
 
-    def state(self):
+    def state(self, actor):
+        """Devuelve únicamente la información que el rol autenticado necesita."""
+        privileged = actor.get("role") in MANAGER_ROLES
         with self.cursor() as (_, cur):
             cur.execute("""SELECT e.id,e.name,e.initials,e.phone,e.status,e.participates_in_operation,e.habitual_position_template_id,
                 cr.id role_id,cr.name role,s.id sector_id,s.name sector,sh.id shift_id,sh.name turno,f.number piso,fc.anchor_date,fc.anchor_type,fc.cycle_length_days,e.legacy_data
                 FROM employees e LEFT JOIN company_roles cr ON cr.id=e.company_role_id LEFT JOIN sectors s ON s.id=e.sector_id LEFT JOIN shifts sh ON sh.id=e.shift_id LEFT JOIN floors f ON f.id=e.floor_id LEFT JOIN employee_franco_cycles fc ON fc.employee_id=e.id ORDER BY e.name""")
             employees=[]
             for r in cur.fetchall():
-                legacy=r["legacy_data"] or {}
-                employees.append({**legacy,"id":r["id"],"name":r["name"],"initials":r["initials"],"phone":r["phone"],"status":r["status"],"participaEnOperacion":r["participates_in_operation"],"habitualPositionTemplateId":r["habitual_position_template_id"],"roleId":r["role_id"],"role":r["role"],"sectorId":r["sector_id"],"sector":r["sector"],"turnoId":r["shift_id"],"turno":r["turno"],"piso":r["piso"],"francoCycle": {"anchorDate":r["anchor_date"].isoformat(),"anchorType":r["anchor_type"],"cycleLengthDays":r["cycle_length_days"]} if r["anchor_date"] else None})
-            cur.execute("SELECT id,username,name,system_role,employee_id FROM users WHERE active=TRUE ORDER BY username")
+                employee={"id":r["id"],"name":r["name"],"initials":r["initials"],"status":r["status"],"participaEnOperacion":r["participates_in_operation"],"roleId":r["role_id"],"role":r["role"],"sectorId":r["sector_id"],"sector":r["sector"],"turnoId":r["shift_id"],"turno":r["turno"],"piso":r["piso"]}
+                if privileged:
+                    employee.update({**(r["legacy_data"] or {}),"phone":r["phone"],"habitualPositionTemplateId":r["habitual_position_template_id"],"francoCycle": {"anchorDate":r["anchor_date"].isoformat(),"anchorType":r["anchor_type"],"cycleLengthDays":r["cycle_length_days"]} if r["anchor_date"] else None})
+                employees.append(employee)
+            if privileged:
+                cur.execute("SELECT id,username,name,system_role,employee_id FROM users WHERE active=TRUE ORDER BY username")
+            else:
+                cur.execute("SELECT id,username,name,system_role,employee_id FROM users WHERE id=%s AND active=TRUE", (actor["id"],))
             users=[self.user_dto(r) for r in cur.fetchall()]
             cur.execute("SELECT * FROM planning_weeks ORDER BY start_date DESC")
             weeks=[self._week_dto(cur,w) for w in cur.fetchall()]
-            cur.execute("SELECT * FROM requests ORDER BY created_at DESC")
+            if privileged:
+                cur.execute("SELECT * FROM requests ORDER BY created_at DESC")
+            else:
+                cur.execute("SELECT * FROM requests WHERE employee_id=%s OR partner_employee_id=%s ORDER BY created_at DESC", (actor.get("employeeId"), actor.get("employeeId")))
             requests=[{"id":r["id"],"employeeId":r["employee_id"],"type":r["type"],"status":r["status"],"partnerEmployeeId":r["partner_employee_id"] or "","partnerStatus":r["partner_status"] or "","note":r["note"],"targetDate":r["target_date"].isoformat() if r["target_date"] else None,"startDate":r["start_date"].isoformat() if r["start_date"] else None,"endDate":r["end_date"].isoformat() if r["end_date"] else None,"scheduleImpact":r["schedule_impact"] or {},"date":iso(r["created_at"]),"revokedAt":iso(r["revoked_at"])} for r in cur.fetchall()]
-            cur.execute("SELECT n.id,n.title,n.text,n.type,n.read_at,n.created_at FROM notifications n ORDER BY n.created_at DESC")
+            cur.execute("SELECT n.id,n.title,n.text,n.type,n.read_at,n.created_at FROM notifications n WHERE recipient_user_id IS NULL OR recipient_user_id=%s ORDER BY n.created_at DESC", (actor["id"],))
             notifications=[{"id":r["id"],"title":r["title"],"text":r["text"],"type":r["type"],"read":bool(r["read_at"]),"time":iso(r["created_at"])} for r in cur.fetchall()]
-            cur.execute("SELECT id,action,entity_id,result,metadata,created_at FROM audit_logs ORDER BY created_at DESC")
-            audit_logs=[{**(r["metadata"] or {}),"id":r["id"],"action":r["action"],"entity":r["entity_id"],"result":r["result"],"time":iso(r["created_at"])} for r in cur.fetchall()]
+            audit_logs=[]
+            if privileged:
+                cur.execute("SELECT id,action,entity_id,result,metadata,created_at FROM audit_logs ORDER BY created_at DESC")
+                audit_logs=[{**(r["metadata"] or {}),"id":r["id"],"action":r["action"],"entity":r["entity_id"],"result":r["result"],"time":iso(r["created_at"])} for r in cur.fetchall()]
             catalogs=self._catalogs(cur)
         active=next((w for w in weeks if w["status"] in {"draft","published","paused"}), None)
         return {"stateRevision": active["version"] if active else 0, "stateUpdatedAt":None, "employees":employees,"users":users,"catalogs":catalogs,"weeklySchedules":weeks,"planningWeek":active,"requests":requests,"notifications":notifications,"auditLogs":audit_logs,"incidents":[],"schedule":[],"draft":[],"days":[],"scheduleVersion":0,"hasDraftChanges":False}

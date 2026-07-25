@@ -42,10 +42,13 @@ DB_PATH = DATA_DIR / "uzumaki-db.json"
 STATE_WRITE_LOCK = Lock()
 SESSIONS = {}
 SESSION_COOKIE = "uzumaki_session"
+CSRF_COOKIE = "uzumaki_csrf"
 PBKDF2_ITERATIONS = 310_000
 MAX_REQUEST_BYTES = 1_048_576
 SESSION_MAX_AGE_SECONDS = int(os.environ.get("SESSION_MAX_AGE_SECONDS", "28800"))
-COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "false").lower() == "true"
+COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "true" if os.environ.get("RAILWAY_ENVIRONMENT") else "false").lower() == "true"
+LOGIN_MAX_ATTEMPTS = int(os.environ.get("LOGIN_MAX_ATTEMPTS", "5"))
+LOGIN_WINDOW_SECONDS = int(os.environ.get("LOGIN_WINDOW_SECONDS", "900"))
 PUBLIC_PATH_PREFIXES = ("/src/", "/assets/")
 PUBLIC_PATHS = {"/", "/index.html"}
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -55,6 +58,8 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 LOGGER = logging.getLogger("uzumaki.server")
+LOGIN_ATTEMPTS = {}
+LOGIN_ATTEMPTS_LOCK = Lock()
 
 
 def log_event(event, **fields):
@@ -123,7 +128,7 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         # Reemplaza el formato ruidoso del servidor estándar por un evento útil.
         log_event("http_request", method=getattr(self, "command", None), path=self._path() if hasattr(self, "path") else None,
-                  remote=self.client_address[0], status=args[1] if len(args) > 1 else None,
+                  remote=self._client_ip(), status=args[1] if len(args) > 1 else None,
                   actor=getattr(self, "_actor_id", None),
                   duration_ms=round((perf_counter() - getattr(self, "_request_started_at", perf_counter())) * 1000, 1))
 
@@ -146,6 +151,59 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
 
     def _path(self):
         return urlparse(self.path).path
+
+    def _client_ip(self):
+        if os.environ.get("RAILWAY_ENVIRONMENT"):
+            forwarded = self.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+            if forwarded:
+                return forwarded
+        return self.client_address[0]
+
+    def _cookie_suffix(self):
+        secure = COOKIE_SECURE or self.headers.get("X-Forwarded-Proto", "").lower() == "https"
+        return "; Secure" if secure else ""
+
+    def _same_origin(self, required=True):
+        origin = self.headers.get("Origin")
+        if not origin:
+            return not required
+        secure = COOKIE_SECURE or self.headers.get("X-Forwarded-Proto", "").lower() == "https"
+        proto = self.headers.get("X-Forwarded-Proto", "https" if secure else "http").split(",")[0].strip()
+        expected = f"{proto}://{self.headers.get('Host', '')}"
+        return hmac.compare_digest(origin.rstrip("/"), expected.rstrip("/"))
+
+    def _csrf_valid(self):
+        jar = cookies.SimpleCookie(self.headers.get("Cookie"))
+        token = jar.get(CSRF_COOKIE)
+        supplied = self.headers.get("X-CSRF-Token", "")
+        return bool(token and supplied and hmac.compare_digest(token.value, supplied))
+
+    def _require_mutation_protection(self):
+        if not self._same_origin() or not self._csrf_valid():
+            log_event("request_rejected", path=self._path(), remote=self._client_ip(), reason="csrf_or_origin")
+            self._send_json(403, {"error": "csrfRejected", "message": "La solicitud no pudo ser validada. Recargá la página e intentá de nuevo."})
+            return False
+        return True
+
+    def _login_limited(self):
+        now = datetime.now(timezone.utc).timestamp()
+        ip = self._client_ip()
+        with LOGIN_ATTEMPTS_LOCK:
+            attempts = [item for item in LOGIN_ATTEMPTS.get(ip, []) if now - item < LOGIN_WINDOW_SECONDS]
+            LOGIN_ATTEMPTS[ip] = attempts
+            return len(attempts) >= LOGIN_MAX_ATTEMPTS
+
+    def _record_login_failure(self):
+        now = datetime.now(timezone.utc).timestamp()
+        ip = self._client_ip()
+        with LOGIN_ATTEMPTS_LOCK:
+            attempts = [item for item in LOGIN_ATTEMPTS.get(ip, []) if now - item < LOGIN_WINDOW_SECONDS]
+            attempts.append(now)
+            LOGIN_ATTEMPTS[ip] = attempts
+
+    def _clear_login_failures(self):
+        with LOGIN_ATTEMPTS_LOCK:
+            LOGIN_ATTEMPTS.pop(self._client_ip(), None)
 
     def _send_json(self, status, payload):
         body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
@@ -179,7 +237,7 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
     def _require_session(self):
         session = self._session()
         if not session:
-            log_event("authentication_required", path=self._path(), remote=self.client_address[0])
+            log_event("authentication_required", path=self._path(), remote=self._client_ip())
             self._send_json(401, {"error": "authenticationRequired", "message": "Iniciá sesión para continuar."})
             return None
         self._actor_id = session.get("id")
@@ -190,25 +248,38 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
         token = POSTGRES.create_session(session_user["id"], SESSION_MAX_AGE_SECONDS) if POSTGRES else secrets.token_urlsafe(32)
         if not POSTGRES:
             SESSIONS[token] = {**session_user, "createdAt": datetime.now(timezone.utc).timestamp()}
+        csrf_token = secrets.token_urlsafe(32)
         log_event("login_success", user_id=session_user["id"], role=session_user["role"], storage="postgres" if POSTGRES else "json")
         body = json.dumps({"user": session_user}, ensure_ascii=False).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
-        secure = "; Secure" if COOKIE_SECURE else ""
-        self.send_header("Set-Cookie", f"{SESSION_COOKIE}={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age={SESSION_MAX_AGE_SECONDS}{secure}")
+        secure = self._cookie_suffix()
+        self.send_header("Set-Cookie", f"{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={SESSION_MAX_AGE_SECONDS}{secure}")
+        self.send_header("Set-Cookie", f"{CSRF_COOKIE}={csrf_token}; SameSite=Strict; Path=/; Max-Age={SESSION_MAX_AGE_SECONDS}{secure}")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
     def do_GET(self):
         path = self._path()
+        if path == "/health":
+            return self._send_json(200, {"ok": True, "service": "gestion-turnos"})
+        if path == "/ready":
+            if not POSTGRES:
+                return self._send_json(503, {"ok": False, "storage": "postgresqlRequired"})
+            try:
+                return self._send_json(200, {"ok": POSTGRES.ready(), "storage": "postgresql"})
+            except Exception:
+                LOGGER.exception("readiness_failed")
+                return self._send_json(503, {"ok": False, "storage": "postgresql"})
         if path == "/api/state":
-            if not self._require_session():
+            session = self._require_session()
+            if not session:
                 return
             if POSTGRES:
                 try:
-                    return self._send_json(200, POSTGRES.state())
+                    return self._send_json(200, POSTGRES.state(session))
                 except Exception:
                     LOGGER.exception("state_read_failed")
                     return self._send_json(503, {"error": "databaseUnavailable", "message": "No se pudo leer PostgreSQL."})
@@ -223,14 +294,44 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
         if path == "/api/me":
             session = self._require_session()
             return self._send_json(200, {"user": {key: value for key, value in session.items() if key != "createdAt"}}) if session else None
+        if path.startswith("/api/"):
+            session = self._require_session()
+            if not session:
+                return
+            if not POSTGRES:
+                return self._send_json(503, {"error": "postgresRequired", "message": "PostgreSQL debe estar configurado."})
+            try:
+                # Contratos de lectura específicos. El frontend puede migrar cada
+                # pantalla progresivamente sin volver a escribir estado global.
+                snapshot = POSTGRES.state(session)
+                if path == "/api/dashboard":
+                    return self._send_json(200, {"planningWeek": snapshot["planningWeek"], "weeklySchedules": snapshot["weeklySchedules"], "requests": snapshot["requests"], "notifications": snapshot["notifications"]})
+                if path == "/api/employees":
+                    return self._send_json(200, {"employees": snapshot["employees"], "users": snapshot["users"], "catalogs": snapshot["catalogs"]})
+                if path == "/api/requests":
+                    return self._send_json(200, {"requests": snapshot["requests"]})
+                if path == "/api/notifications":
+                    return self._send_json(200, {"notifications": snapshot["notifications"]})
+                if path.startswith("/api/planning/weeks/"):
+                    week_id = path.split("/")[4]
+                    week = next((item for item in snapshot["weeklySchedules"] if item["id"] == week_id), None)
+                    return self._send_json(200, {"week": week} if week else {"error": "notFound", "message": "Semana inexistente."}) if week else self._send_json(404, {"error": "notFound", "message": "Semana inexistente."})
+            except Exception:
+                LOGGER.exception("api_read_failed path=%s", path)
+                return self._send_json(503, {"error": "databaseUnavailable", "message": "No se pudo leer PostgreSQL."})
         # Nunca exponer la base de datos, el código del servidor ni archivos del repositorio.
-        if path not in PUBLIC_PATHS and not path.startswith(PUBLIC_PATH_PREFIXES):
+        if path.startswith("/src/data/") or (path not in PUBLIC_PATHS and not path.startswith(PUBLIC_PATH_PREFIXES)):
             return self._send_json(404, {"error": "Recurso no encontrado"})
         return super().do_GET()
 
     def do_POST(self):
         path = self._path()
         if path == "/api/auth/login":
+            if not self._same_origin(required=False):
+                return self._send_json(403, {"error": "originRejected", "message": "La solicitud no es válida."})
+            if self._login_limited():
+                log_event("login_rate_limited", remote=self._client_ip())
+                return self._send_json(429, {"error": "tooManyAttempts", "message": "Demasiados intentos. Esperá unos minutos antes de volver a probar."})
             payload = self._read_json_body() or {}
             username = str(payload.get("username", "")).strip().lower()
             password = str(payload.get("password", ""))
@@ -243,8 +344,10 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
                     LOGGER.exception("login_database_failed username=%s", username)
                     return self._send_json(503, {"error": "databaseUnavailable", "message": "No se pudo conectar con PostgreSQL."})
                 if not user or not verify_password(password, user.get("password_hash", "")):
+                    self._record_login_failure()
                     log_event("login_failed", username=username, reason="invalid_credentials")
                     return self._send_json(401, {"error": "invalidCredentials", "message": "Usuario o contraseña incorrectos."})
+                self._clear_login_failures()
                 return self._send_session(POSTGRES.user_dto(user))
             with STATE_WRITE_LOCK:
                 try:
@@ -257,10 +360,14 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
                     write_state(state)
                 user = next((item for item in state.get("users", []) if item.get("username", "").lower() == username), None)
             if not user or not verify_password(password, user.get("passwordHash", "")):
+                self._record_login_failure()
                 log_event("login_failed", username=username, reason="invalid_credentials")
                 return self._send_json(401, {"error": "invalidCredentials", "message": "Usuario o contraseña incorrectos."})
+            self._clear_login_failures()
             return self._send_session(user)
         if path == "/api/auth/logout":
+            if not self._require_mutation_protection():
+                return
             jar = cookies.SimpleCookie(self.headers.get("Cookie"))
             token = jar.get(SESSION_COOKIE)
             session = self._session()
@@ -271,12 +378,15 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
                     SESSIONS.pop(token.value, None)
             log_event("logout", user_id=session.get("id") if session else None)
             self.send_response(204)
-            secure = "; Secure" if COOKIE_SECURE else ""
-            self.send_header("Set-Cookie", f"{SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0{secure}")
+            secure = self._cookie_suffix()
+            self.send_header("Set-Cookie", f"{SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{secure}")
+            self.send_header("Set-Cookie", f"{CSRF_COOKIE}=; SameSite=Strict; Path=/; Max-Age=0{secure}")
             self.end_headers()
             return
         session = self._require_session()
         if not session:
+            return
+        if not self._require_mutation_protection():
             return
         if POSTGRES:
             try:
@@ -316,6 +426,8 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
         session = self._require_session()
         if not session:
             return
+        if not self._require_mutation_protection():
+            return
         if not POSTGRES:
             return self._send_json(404, {"error": "Endpoint no encontrado"})
         path = self._path()
@@ -346,6 +458,8 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
             return self._send_json(404, {"error": "Endpoint no encontrado"})
         session = self._require_session()
         if not session:
+            return
+        if not self._require_mutation_protection():
             return
         if POSTGRES:
             return self._send_json(410, {"error": "legacyStateWriteDisabled", "message": "PostgreSQL es la fuente de datos. Usá los endpoints de dominio."})

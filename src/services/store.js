@@ -1,29 +1,37 @@
-import {
-  auditLogs,
-  DAYS,
-  demoUsers as initialUsers,
-  employees,
-  incidents,
-  initialAudit,
-  initialNotifications,
-  initialRequests,
-  initialSchedule,
-  pisos,
-  referenceSchedule,
-  requests,
-  rolesOperativos,
-  rolesSistema,
-  sectores,
-  turnos,
-  weeklySchedules,
-} from "../data/mockData.js?v=20260717-2";
+// Railway/PostgreSQL es la fuente de datos. No se importan datos de ejemplo
+// al navegador, para que no queden expuestos como un módulo estático público.
+const DAYS = [];
+const initialUsers = [];
+const employees = [];
+const incidents = [];
+const initialAudit = [];
+const initialNotifications = [];
+const initialRequests = [];
+const initialSchedule = [];
+const pisos = {};
+const referenceSchedule = { days: [] };
+const rolesOperativos = {};
+const rolesSistema = {};
+const sectores = {};
+const turnos = {};
+const weeklySchedules = [];
 
 const KEY = "uzumaki-mvp-state-v5";
 const LEGACY_KEYS = ["uzumaki-mvp-state-v4", "uzumaki-mvp-state-v3", "uzumaki-mvp-state-v2", "uzumaki-mvp-state-v1", "turnia-mvp-state-v1"];
 const API_STATE_URL = "/api/state";
+const CSRF_COOKIE = "uzumaki_csrf";
 let saveQueue = Promise.resolve();
 export const STATE_FILE_NAME = "uzumaki-db.json";
 export const canPersistStateFile = () => window.location.protocol.startsWith("http");
+const csrfToken = () => document.cookie.split(";").map((item) => item.trim()).find((item) => item.startsWith(`${CSRF_COOKIE}=`))?.slice(CSRF_COOKIE.length + 1) || "";
+export const csrfHeaders = () => {
+  const token = csrfToken();
+  return token ? { "X-CSRF-Token": token } : {};
+};
+export function clearCachedState() {
+  localStorage.removeItem(KEY);
+  LEGACY_KEYS.forEach((key) => localStorage.removeItem(key));
+}
 const normalizePlanningWeek = (week) => {
   if (!week || typeof week !== "object") return null;
   return {
@@ -186,7 +194,9 @@ export async function authenticate(username, password) {
 }
 
 export async function endSession() {
-  if (canPersistStateFile()) await fetch("/api/auth/logout", { method: "POST" });
+  if (!canPersistStateFile()) return;
+  const response = await fetch("/api/auth/logout", { method: "POST", headers: csrfHeaders() });
+  if (!response.ok && response.status !== 401) throw new Error("No se pudo cerrar la sesión.");
 }
 
 async function loadStateFromApi(options = {}) {
@@ -240,7 +250,7 @@ async function persistState(state, options = {}) {
   try {
     const response = await fetch(API_STATE_URL, {
       method: "PUT",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...csrfHeaders() },
       body: JSON.stringify(state),
     });
     if (response.status === 409) {
@@ -288,8 +298,7 @@ export function hydrateStateFromJson(text) {
 }
 
 export function resetState(stateRevision = 0) {
-  localStorage.removeItem(KEY);
-  LEGACY_KEYS.forEach((key) => localStorage.removeItem(key));
+  clearCachedState();
   const state = freshState();
   state.stateRevision = stateRevision;
   saveState(state);
