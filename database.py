@@ -70,6 +70,7 @@ class Database:
         raw = secrets.token_urlsafe(32)
         digest = hashlib.sha256(raw.encode()).hexdigest()
         with self.cursor() as (conn, cur):
+            cur.execute("DELETE FROM sessions WHERE expires_at <= now() OR (revoked_at IS NOT NULL AND revoked_at < now() - interval '30 days')")
             cur.execute("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (%s, %s, %s)", (digest, user_id, utcnow() + timedelta(seconds=max_age)))
             conn.commit()
         return raw
@@ -163,6 +164,91 @@ class Database:
         if actor.get("role") not in MANAGER_ROLES:
             raise DomainError("Tu perfil no puede modificar la planificación.", 403, "forbidden")
 
+    @staticmethod
+    def _audit(cur, actor_id, action, entity_type, entity_id, result="ok", metadata=None):
+        cur.execute(
+            "INSERT INTO audit_logs (id,actor_user_id,action,entity_type,entity_id,result,metadata) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            (secrets.token_hex(16), actor_id, action, entity_type, entity_id, result, Jsonb(metadata or {})),
+        )
+
+    @staticmethod
+    def _catalog_id(cur, table, value, field="name"):
+        if not value:
+            return None
+        cur.execute(f"SELECT id FROM {table} WHERE id=%s OR {field}=%s", (value, value))
+        row = cur.fetchone()
+        if not row:
+            raise DomainError("Uno de los valores de catálogo no es válido.")
+        return row["id"]
+
+    def upsert_user(self, actor, data, password_hash=None):
+        """Crea o actualiza usuario y empleado en una única transacción."""
+        self._assert_manager(actor)
+        user_id = str(data.get("userId") or "").strip() or None
+        username = str(data.get("username") or "").strip().lower()
+        name = str(data.get("name") or "").strip()
+        role = str(data.get("systemRole") or "").strip()
+        company_role = str(data.get("companyRole") or "").strip()
+        if not username or not name or role not in ROLE_TO_SYSTEM or not company_role:
+            raise DomainError("Usuario, nombre y roles son obligatorios.")
+        if not user_id and not password_hash:
+            raise DomainError("La contraseña es obligatoria para un usuario nuevo.")
+        with self.cursor() as (conn, cur):
+            company_role_id = self._catalog_id(cur, "company_roles", company_role)
+            sector_id = self._catalog_id(cur, "sectors", data.get("sector"))
+            shift_id = self._catalog_id(cur, "shifts", data.get("turno"))
+            floor_id = self._catalog_id(cur, "floors", data.get("piso"), "number") if data.get("piso") else None
+            participates = company_role in {"Personal de camarería", "Personal de cocina", "Ayudante de cocina", "Personal franquero"}
+            if user_id:
+                cur.execute("SELECT id,employee_id FROM users WHERE id=%s FOR UPDATE", (user_id,))
+                existing = cur.fetchone()
+                if not existing:
+                    raise DomainError("El usuario no existe.", 404, "notFound")
+                employee_id = existing["employee_id"] or str(data.get("employeeId") or "").strip() or secrets.token_hex(16)
+                cur.execute("SELECT id FROM users WHERE lower(username)=lower(%s) AND id<>%s", (username, user_id))
+                if cur.fetchone():
+                    raise DomainError("Ese usuario ya existe.", 409, "duplicateUsername")
+                cur.execute("SELECT id FROM employees WHERE id=%s", (employee_id,))
+                if cur.fetchone():
+                    cur.execute("""UPDATE employees SET name=%s,initials=%s,company_role_id=%s,sector_id=%s,shift_id=%s,floor_id=%s,phone=%s,
+                        participates_in_operation=%s WHERE id=%s""", (name, "".join(part[0] for part in name.split()[:2]).upper(), company_role_id, sector_id, shift_id, floor_id, str(data.get("phone") or "").strip(), participates, employee_id))
+                else:
+                    cur.execute("""INSERT INTO employees (id,name,initials,company_role_id,sector_id,shift_id,floor_id,phone,participates_in_operation)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""", (employee_id, name, "".join(part[0] for part in name.split()[:2]).upper(), company_role_id, sector_id, shift_id, floor_id, str(data.get("phone") or "").strip(), participates))
+                fields, values = ["username=%s", "name=%s", "system_role=%s", "employee_id=%s"], [username, name, ROLE_TO_SYSTEM[role], employee_id]
+                if password_hash:
+                    fields.append("password_hash=%s")
+                    values.append(password_hash)
+                values.append(user_id)
+                cur.execute(f"UPDATE users SET {','.join(fields)} WHERE id=%s", values)
+                self._audit(cur, actor["id"], "updated_user", "user", user_id, metadata={"employeeId": employee_id, "role": role})
+            else:
+                employee_id = str(data.get("employeeId") or "").strip() or secrets.token_hex(16)
+                cur.execute("SELECT id FROM users WHERE lower(username)=lower(%s)", (username,))
+                if cur.fetchone():
+                    raise DomainError("Ese usuario ya existe.", 409, "duplicateUsername")
+                cur.execute("""INSERT INTO employees (id,name,initials,company_role_id,sector_id,shift_id,floor_id,phone,participates_in_operation)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""", (employee_id, name, "".join(part[0] for part in name.split()[:2]).upper(), company_role_id, sector_id, shift_id, floor_id, str(data.get("phone") or "").strip(), participates))
+                user_id = secrets.token_hex(16)
+                cur.execute("INSERT INTO users (id,username,name,system_role,employee_id,password_hash) VALUES (%s,%s,%s,%s,%s,%s)", (user_id, username, name, ROLE_TO_SYSTEM[role], employee_id, password_hash))
+                self._audit(cur, actor["id"], "created_user", "user", user_id, metadata={"employeeId": employee_id, "role": role})
+            conn.commit()
+        return {"ok": True, "id": user_id, "employeeId": employee_id}
+
+    def deactivate_user(self, actor, user_id):
+        self._assert_manager(actor)
+        if user_id == actor.get("id"):
+            raise DomainError("No podés desactivar tu propia sesión.", 409, "selfDeactivation")
+        with self.cursor() as (conn, cur):
+            cur.execute("UPDATE users SET active=FALSE WHERE id=%s AND active=TRUE RETURNING employee_id,username", (user_id,))
+            row = cur.fetchone()
+            if not row:
+                raise DomainError("El usuario no existe o ya está desactivado.", 404, "notFound")
+            cur.execute("UPDATE sessions SET revoked_at=now() WHERE user_id=%s AND revoked_at IS NULL", (user_id,))
+            self._audit(cur, actor["id"], "deactivated_user", "user", user_id, metadata={"username": row["username"]})
+            conn.commit()
+        return {"ok": True, "id": user_id}
+
     def assign(self, actor, week_id, position_id, employee_id, expected_version=None):
         self._assert_manager(actor)
         with self.cursor() as (conn, cur):
@@ -187,6 +273,7 @@ class Database:
             if existing: cur.execute("UPDATE planning_assignments SET employee_id=%s,assignment_date=%s,created_by=%s,updated_at=now() WHERE id=%s",(employee_id,pos["date"],actor["id"],existing["id"]))
             else: cur.execute("INSERT INTO planning_assignments (id,planning_week_id,position_id,employee_id,assignment_date,created_by) VALUES (%s,%s,%s,%s,%s,%s)",(secrets.token_hex(16),week_id,position_id,employee_id,pos["date"],actor["id"]))
             cur.execute("UPDATE planning_weeks SET version=version+1,updated_at=now() WHERE id=%s RETURNING version",(week_id,)); version=cur.fetchone()["version"]
+            self._audit(cur, actor["id"], "assigned_employee", "planning_position", position_id, metadata={"weekId": week_id, "employeeId": employee_id})
             conn.commit()
         return {"ok":True,"version":version,"employeeName":emp["name"]}
 
@@ -200,6 +287,7 @@ class Database:
             if not (week["start_date"] <= date.fromisoformat(day) <= week["end_date"]): raise DomainError("La fecha no pertenece a la semana.")
             cur.execute("INSERT INTO planning_days_off (id,planning_week_id,employee_id,date,sector_id,type,created_by) VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (planning_week_id,employee_id,date) DO UPDATE SET type=EXCLUDED.type,sector_id=EXCLUDED.sector_id",(secrets.token_hex(16),week_id,employee_id,day,sector_id,kind,actor["id"]))
             cur.execute("UPDATE planning_weeks SET version=version+1,updated_at=now() WHERE id=%s RETURNING version",(week_id,)); version=cur.fetchone()["version"]
+            self._audit(cur, actor["id"], "set_manual_day_off", "planning_day_off", employee_id, metadata={"weekId": week_id, "date": day, "type": kind})
             conn.commit()
         return {"ok":True,"version":version}
 
@@ -241,6 +329,7 @@ class Database:
             values.append(week_id)
             cur.execute(f"UPDATE planning_weeks SET {fields} WHERE id=%s RETURNING version", values)
             version=cur.fetchone()["version"]
+            self._audit(cur, actor["id"], "changed_week_status", "planning_week", week_id, result=status)
             conn.commit()
         return {"ok":True,"status":status,"version":version}
 
@@ -253,6 +342,7 @@ class Database:
             cur.execute("DELETE FROM planning_assignments WHERE planning_week_id=%s AND position_id=%s RETURNING id", (week_id,position_id))
             if not cur.fetchone(): raise DomainError("No existía una asignación para quitar.",404,"notFound")
             cur.execute("UPDATE planning_weeks SET version=version+1,updated_at=now() WHERE id=%s RETURNING version",(week_id,)); version=cur.fetchone()["version"]
+            self._audit(cur, actor["id"], "removed_assignment", "planning_position", position_id, metadata={"weekId": week_id})
             conn.commit()
         return {"ok":True,"version":version}
 
@@ -299,11 +389,16 @@ class Database:
             conn.commit()
         return {"ok":True,"version":version}
 
-    def delete_week(self, actor, week_id):
+    def delete_week(self, actor, week_id, expected_version=None):
         self._assert_manager(actor)
         with self.cursor() as (conn, cur):
-            cur.execute("DELETE FROM planning_weeks WHERE id=%s RETURNING id",(week_id,))
-            if not cur.fetchone(): raise DomainError("Semana inexistente.",404,"notFound")
+            cur.execute("SELECT version FROM planning_weeks WHERE id=%s FOR UPDATE", (week_id,))
+            week = cur.fetchone()
+            if not week: raise DomainError("Semana inexistente.",404,"notFound")
+            if expected_version is not None and expected_version != week["version"]:
+                raise DomainError("La semana fue modificada por otra persona.",409,"versionConflict")
+            cur.execute("DELETE FROM planning_weeks WHERE id=%s", (week_id,))
+            self._audit(cur, actor["id"], "deleted_planning_week", "planning_week", week_id)
             conn.commit()
         return {"ok":True}
 
@@ -349,3 +444,22 @@ class Database:
             if not cur.fetchone(): raise DomainError("La solicitud no existe o ya fue resuelta.",404,"notFound")
             conn.commit()
         return {"ok":True,"status":status}
+
+    def revoke_request(self, actor, request_id, reason):
+        reason = str(reason or "").strip()
+        if not reason:
+            raise DomainError("Indicá un motivo de revocación.")
+        with self.cursor() as (conn, cur):
+            cur.execute("SELECT employee_id,status FROM requests WHERE id=%s FOR UPDATE", (request_id,))
+            request = cur.fetchone()
+            if not request:
+                raise DomainError("La solicitud no existe.", 404, "notFound")
+            if actor.get("role") not in MANAGER_ROLES and request["employee_id"] != actor.get("employeeId"):
+                raise DomainError("No podés revocar esta solicitud.", 403, "forbidden")
+            if request["status"] not in {"approved", "pendingManager", "pendingPartner"}:
+                raise DomainError("La solicitud no puede revocarse en su estado actual.", 409, "invalidState")
+            cur.execute("""UPDATE requests SET status='revoked',revoked_at=now(),revoked_by=%s,revocation_reason=%s,updated_at=now()
+                WHERE id=%s""", (actor["id"], reason, request_id))
+            self._audit(cur, actor["id"], "revoked_request", "request", request_id, metadata={"reason": reason})
+            conn.commit()
+        return {"ok": True, "status": "revoked", "requiresManualReview": request["status"] == "approved"}
