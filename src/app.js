@@ -9,13 +9,15 @@ const app = document.querySelector("#app");
 const toastRegion = document.querySelector("#toast-region");
 let state;
 try {
-  state = await loadState({ remote: Boolean(user), requireAuth: Boolean(user) });
+  state = user?.mustChangePassword
+    ? await loadState({ remote: false })
+    : await loadState({ remote: Boolean(user), requireAuth: Boolean(user) });
 } catch {
   user = null;
   sessionStorage.removeItem(SESSION_KEY);
   state = await loadState({ remote: false });
 }
-if (user && !state.users.some((item) => item.id === user.id || item.username === user.username)) {
+if (user && !user.mustChangePassword && !state.users.some((item) => item.id === user.id || item.username === user.username)) {
   user = null;
   sessionStorage.removeItem(SESSION_KEY);
 }
@@ -31,7 +33,7 @@ let modalReturnFocus = null;
 let planningFocusedEmployeeId = null;
 
 const icons = {
-  dashboard: "▦", schedule: "▤", employees: "♙", requests: "↔", notifications: "♢", audit: "◷", logout: "↪", plus: "+", menu: "☰",
+  dashboard: "▦", schedule: "▤", employees: "♙", requests: "↔", notifications: "🔔", audit: "◷", logout: "↪", plus: "+", menu: "☰",
 };
 const statusText = {
   pending: "Pendiente",
@@ -111,7 +113,7 @@ async function persist(options = {}) {
 // Los cambios operativos se envían como comandos pequeños al backend. La base
 // valida permisos, disponibilidad y la versión de la semana; luego se relee el
 // estado canónico. El navegador deja de ser dueño de la planificación.
-async function apiCommand(path, payload = null, method = "POST", extraHeaders = {}) {
+async function apiCommand(path, payload = null, method = "POST", extraHeaders = {}, reloadState = true) {
   const response = await fetch(path, {
     method,
     headers: { "Content-Type": "application/json", ...csrfHeaders(), ...extraHeaders },
@@ -119,8 +121,10 @@ async function apiCommand(path, payload = null, method = "POST", extraHeaders = 
   });
   const result = await response.json();
   if (!response.ok) throw new Error(result.message || "No se pudo completar la operación.");
-  state = await loadState({ remote: true, requireAuth: true });
-  render();
+  if (reloadState) {
+    state = await loadState({ remote: true, requireAuth: true });
+    render();
+  }
   return result;
 }
 
@@ -174,7 +178,7 @@ function sidebar() {
 function topbar() {
   const titles = { dashboard: isAdminRole(user.role) ? "Resumen operativo" : `Hola, ${user.name.split(" ")[0]}`, schedule: isAdminRole(user.role) ? "Grilla operativa" : "Mi semana", employees: "Personal", requests: isAdminRole(user.role) ? "Solicitudes" : "Mis solicitudes", notifications: "Notificaciones", audit: "Auditoría" };
   const weekLabel = state.planningWeek ? `${formatIsoDate(state.planningWeek.startDate)} — ${formatIsoDate(state.planningWeek.endDate)}` : "Semana sin crear";
-  return `<header class="topbar"><button class="mobile-menu" data-action="menu" aria-label="Abrir menú de navegación">${icons.menu}</button><div><span class="crumb">Uzumaki /</span><strong>${titles[page]}</strong></div><div class="top-actions"><button class="icon-button" data-page="notifications" aria-label="Notificaciones">♢${unreadCount() ? `<b>${unreadCount()}</b>` : ""}</button><span class="date-pill">${weekLabel}</span></div></header>`;
+  return `<header class="topbar"><button class="mobile-menu" data-action="menu" aria-label="Abrir menú de navegación">${icons.menu}</button><div><span class="crumb">Uzumaki /</span><strong>${titles[page]}</strong></div><div class="top-actions"><button class="icon-button" data-page="notifications" aria-label="Notificaciones">${icons.notifications}${unreadCount() ? `<b>${unreadCount()}</b>` : ""}</button><span class="date-pill">${weekLabel}</span></div></header>`;
 }
 
 function renderPage() {
@@ -421,6 +425,9 @@ function canViewRequestDetail(request) {
 function requestMatchesFilter(request, filter) {
   if (filter === "all") return true;
   if (filter === "active") return activeRequestStatuses.includes(request.status);
+  if (filter === "waitingResponse") return request.status === "pendingPartner";
+  if (filter === "rejected") return ["rejected", "partnerRejected"].includes(request.status);
+  if (filter === "history") return ["approved", "rejected", "partnerRejected", "revoked"].includes(request.status);
   return request.status === filter;
 }
 
@@ -650,9 +657,9 @@ function planningWeekStructure(week, conflicts, showExceptions = true, providedD
   });
   return `${planningFocusToolbar(week, focusedEmployeeId, daysOffSummary)}<div class="planning-position-sectors ${staffView ? "planning-position-sectors--staff" : ""}" aria-label="Puestos operativos">
     ${planningPositionSector(week, { sector: "Cocina", key: "kitchen", icon: "🍳", eyebrow: "SECTOR OPERATIVO" }, conflicts, showExceptions, staffView, focusedEmployeeId)}
-    ${staffView ? "" : planningDaysOffSector(week, "Cocina", daysOffSummary, conflicts)}
+    ${planningDaysOffSector(week, "Cocina", daysOffSummary, conflicts)}
     ${planningPositionSector(week, { sector: "Pisos", key: "floors", icon: "🏥", eyebrow: "COBERTURA POR PISO" }, conflicts, showExceptions, staffView, focusedEmployeeId)}
-    ${staffView ? "" : planningDaysOffSector(week, "Pisos", daysOffSummary, conflicts)}
+    ${planningDaysOffSector(week, "Pisos", daysOffSummary, conflicts)}
   </div>`;
 }
 
@@ -1099,7 +1106,7 @@ function employeesPage() {
       .filter(Boolean)
       .some((value) => value.toLowerCase().includes(query));
   });
-  const withAccess = state.users.filter((item) => item.employeeId).length;
+  const withAccess = state.users.filter((item) => item.employeeId && item.active !== false).length;
   return `<section class="people-page">
     <header class="people-page-header"><div><span class="eyebrow">DOTACIÓN</span><h1>Personal</h1><p>Directorio operativo, accesos y ubicación del equipo.</p></div><div class="people-page-actions"><span class="people-access-summary"><b>${withAccess}</b> accesos activos</span>${canManage ? `<button class="button primary" data-action="new-user">${icons.plus} Nuevo acceso</button>` : ""}</div></header>
     <section class="people-toolbar"><label class="search"><span aria-hidden="true">⌕</span><input id="employee-search" placeholder="Buscar por nombre, rol, sector o turno…" value="${employeeSearch}" /></label><span class="people-result-count"><i></i>${rows.length} de ${state.employees.length} personas</span></section>
@@ -1125,9 +1132,11 @@ function usersAdminPanel(canManage, rows = userRows()) {
   return `<section class="people-table-panel"><div class="people-table-label"><div><strong>Directorio del equipo</strong><small>Gestioná los perfiles y accesos desde cada registro.</small></div><span>${rows.length} registros</span></div><div class="people-table-scroll"><table class="people-table"><thead><tr><th>Usuario</th><th>Persona</th><th>Rol empresa</th><th>Ubicación</th><th>Rol sistema</th><th>Gestión</th></tr></thead><tbody>${rows.map(({ user: rowUser, employee }) => {
       const rowId = rowUser?.id || employee?.id || "";
       const actions = !canManage ? "" : rowUser
-        ? `<div class="table-actions"><button class="row-action" data-action="edit-user" data-id="${escapeHtml(rowUser.id)}">Editar</button><button class="row-action danger" data-action="delete-user" data-id="${escapeHtml(rowUser.id)}">Desactivar</button></div>`
+        ? rowUser.active === false
+          ? `<div class="table-actions"><button class="row-action" data-action="reactivate-user" data-id="${escapeHtml(rowUser.id)}">Reactivar</button></div>`
+          : `<div class="table-actions"><button class="row-action" data-action="edit-user" data-id="${escapeHtml(rowUser.id)}">Editar</button><button class="row-action" data-action="reset-user-password" data-id="${escapeHtml(rowUser.id)}">Restablecer clave</button><button class="row-action danger" data-action="delete-user" data-id="${escapeHtml(rowUser.id)}">Desactivar</button></div>`
         : employee ? `<button class="row-action" data-action="create-user-for-employee" data-employee-id="${escapeHtml(employee.id)}">Crear acceso</button>` : "";
-      return `<tr><td>${rowUser ? `<strong>${escapeHtml(rowUser.username)}</strong>` : `<span class="muted">Sin usuario</span>`}</td><td><div class="person-cell"><span class="avatar">${escapeHtml(employee?.initials || initials(rowUser?.name || rowUser?.username || "?"))}</span><div><strong>${escapeHtml(employee?.name || rowUser?.name || "Sin persona")}</strong><small>${escapeHtml(employee?.phone || "Sin teléfono")}</small></div></div></td><td>${escapeHtml(employee?.role || "Sin rol laboral")}</td><td>${employeeAssignment(employee || {})}</td><td>${rowUser ? escapeHtml(roleLabel[rowUser.role] || rowUser.role) : `<span class="muted">Sin acceso</span>`}</td><td>${actions || `<span class="muted">Sin permisos</span>`}</td></tr>`;
+      return `<tr class="${rowUser?.active === false ? "is-inactive" : ""}"><td>${rowUser ? `<strong>${escapeHtml(rowUser.username)}</strong>${rowUser.active === false ? `<small class="access-status">Acceso desactivado</small>` : ""}` : `<span class="muted">Sin usuario</span>`}</td><td><div class="person-cell"><span class="avatar">${escapeHtml(employee?.initials || initials(rowUser?.name || rowUser?.username || "?"))}</span><div><strong>${escapeHtml(employee?.name || rowUser?.name || "Sin persona")}</strong><small>${escapeHtml(employee?.phone || "Sin teléfono")}</small></div></div></td><td>${escapeHtml(employee?.role || "Sin rol laboral")}</td><td>${employeeAssignment(employee || {})}</td><td>${rowUser ? escapeHtml(roleLabel[rowUser.role] || rowUser.role) : `<span class="muted">Sin acceso</span>`}</td><td>${actions || `<span class="muted">Sin permisos</span>`}</td></tr>`;
     }).join("")}</tbody></table>${rows.length ? "" : empty("No encontramos usuarios con esa búsqueda")}</div></section>`;
 }
 
@@ -1145,19 +1154,22 @@ function requestsPage() {
   const admin = isAdminRole(user.role);
   const visibleRequests = (admin ? state.requests : state.requests.filter((r) => r.employeeId === user.employeeId || r.partnerEmployeeId === user.employeeId)).map(normalizeRequestForView);
   const filtered = visibleRequests.filter((request) => requestMatchesFilter(request, requestFilter));
-  const tabs = [
-    ["all", "Todas"],
-    ["active", "Pendientes"],
-    ["pending", "Pendiente"],
-    ["pendingPartner", "Compañero"],
-    ["partnerRejected", "Rechazadas comp."],
-    ["pendingManager", "Encargada"],
-    ["approved", "Aprobadas"],
-    ["rejected", "Rechazadas"],
+  const filters = [
+    ["all", "Todas", "◉"],
+    ["active", "En curso", "●"],
+    ["waitingResponse", "Esperando respuesta", "↔"],
+    ["approved", "Aprobadas", "✓"],
+    ["rejected", "Rechazadas", "×"],
+    ["history", "Historial", "◷"],
   ];
   return `${pageHeading("GESTIÓN", admin ? "Solicitudes" : "Mis solicitudes", admin ? "Revisá y resolvé los pedidos del equipo." : "Creá pedidos y seguí su resolución.", `<button class="button primary" data-action="new-request">${icons.plus} Nueva solicitud</button>`)}
-    <div class="tabs">${tabs.map(([id, label]) => `<button class="${requestFilter === id ? "active" : ""}" data-action="filter-request" data-filter="${id}">${label}${id === "active" ? `<b>${visibleRequests.filter((r) => activeRequestStatuses.includes(r.status)).length}</b>` : ""}</button>`).join("")}</div>
-    <section class="request-cards">${filtered.map((r) => requestCard(r, admin)).join("") || empty("No hay solicitudes en este estado")}</section>`;
+    <div class="requests-layout">
+      <aside class="request-filter-panel" aria-label="Filtros de solicitudes">
+        <h2>Filtros</h2>
+        <div class="request-filter-list">${filters.map(([id, label, icon]) => `<button class="request-filter-card ${requestFilter === id ? "active" : ""}" data-action="filter-request" data-filter="${id}" ${requestFilter === id ? 'aria-pressed="true"' : 'aria-pressed="false"'}><span class="request-filter-icon" aria-hidden="true">${icon}</span><span><strong>${label}</strong></span><b>${visibleRequests.filter((request) => requestMatchesFilter(request, id)).length}</b></button>`).join("")}</div>
+      </aside>
+      <section class="request-results-panel" aria-live="polite"><header class="request-results-head"><span>${filters.find(([id]) => id === requestFilter)?.[1] || "Solicitudes"}</span><b>${filtered.length}</b></header><div class="request-cards">${filtered.map((r) => requestCard(r, admin)).join("") || empty("No hay solicitudes en este estado")}</div></section>
+    </div>`;
 }
 
 function requestCard(r, admin) {
@@ -1201,6 +1213,14 @@ function loginErrorModal(message) {
 
 function logoutConfirmationModal() {
   modal(`<span class="dialog-icon" aria-hidden="true">↪</span><span class="eyebrow">CERRAR SESIÓN</span><h2>¿Querés salir de Uzumaki?</h2><p class="muted">Tendrás que ingresar nuevamente para consultar la operación.</p><div class="modal-actions"><button type="button" class="button secondary" data-action="close-modal">Cancelar</button><button type="button" class="button danger-soft" data-action="perform-logout">Cerrar sesión</button></div>`, "confirm-modal", "Confirmar cierre de sesión");
+}
+
+function accountSessionModal() {
+  modal(`<button class="modal-close" data-action="close-modal" aria-label="Cerrar">×</button><span class="eyebrow">MI CUENTA</span><h2>${escapeHtml(user.name)}</h2><p class="muted">${escapeHtml(roleLabel[user.role])} · ${escapeHtml(user.username)}</p><div class="account-session-actions"><button type="button" class="account-session-action" data-action="open-own-password-change"><span class="account-session-icon" aria-hidden="true">⌁</span><span><strong>Cambiar contraseña</strong><small>Actualizá tu clave de acceso.</small></span><span aria-hidden="true">›</span></button><button type="button" class="account-session-action account-session-action--logout" data-action="open-logout-confirmation"><span class="account-session-icon" aria-hidden="true">↪</span><span><strong>Cerrar sesión</strong><small>Salir de este dispositivo.</small></span><span aria-hidden="true">›</span></button></div>`, "account-modal", "Opciones de cuenta");
+}
+
+function ownPasswordChangeModal() {
+  modal(`<button class="modal-close" data-action="close-modal" aria-label="Cerrar">×</button><span class="eyebrow">SEGURIDAD DE LA CUENTA</span><h2>Cambiar contraseña</h2><p class="muted">Confirmá tu contraseña actual y definí una nueva para proteger tu acceso.</p><form id="own-password-change-form"><label>Contraseña actual<input name="currentPassword" type="password" autocomplete="current-password" required autofocus /></label><label>Nueva contraseña<input name="newPassword" type="password" minlength="10" autocomplete="new-password" required /></label><label>Confirmar nueva contraseña<input name="confirmPassword" type="password" minlength="10" autocomplete="new-password" required /></label><div class="week-form-note"><strong>Sesiones protegidas</strong><p>Usá al menos 10 caracteres. Al guardar se cerrarán las otras sesiones activas de tu cuenta.</p></div><div class="modal-actions"><button type="button" class="button secondary" data-action="open-account-session">Volver</button><button class="button primary">Guardar contraseña</button></div></form>`, "account-modal", "Cambiar contraseña");
 }
 
 function clearClientSession() {
@@ -1325,12 +1345,13 @@ function floorSelectOptions(selected = "") {
 }
 
 function systemRoleSelectOptions(selected = "staff") {
-  return selectOptions([
+  const options = [
     { value: "staff", label: "Personal operativo" },
     { value: "manager", label: "Encargada" },
     { value: "supervisor", label: "Supervisión" },
     { value: "admin", label: "Administración principal" },
-  ], selected);
+  ];
+  return selectOptions(user?.role === "manager" ? options.filter((item) => ["staff", "supervisor"].includes(item.value)) : options, selected);
 }
 
 function newUserModal() {
@@ -1356,7 +1377,6 @@ function userModal(targetUser = null, linkedEmployee = null) {
   const employee = targetUser ? state.employees.find((item) => item.id === targetUser.employeeId) : linkedEmployee;
   const isEditing = Boolean(targetUser);
   const username = targetUser?.username || (employee ? slugify(employee.name).split("-")[0] : "");
-  const password = "";
   const name = employee?.name || targetUser?.name || "";
   const companyRole = employee?.role || companyRoleOptions[0];
   const systemRole = targetUser?.role || "staff";
@@ -1364,7 +1384,18 @@ function userModal(targetUser = null, linkedEmployee = null) {
   const turno = employee?.turno || "";
   const piso = employee?.piso || "";
   const phone = employee?.phone || "";
-  modal(`<button class="modal-close" data-action="close-modal">×</button><span class="eyebrow">${isEditing ? "EDITAR USUARIO" : "NUEVO USUARIO"}</span><h2>${isEditing ? "Editar usuario" : "Agregar usuario"}</h2><p class="muted">${isEditing ? "Los cambios actualizan datos laborales. Dejá la contraseña vacía para conservarla." : "Se crea el acceso a la app con sus datos laborales en una sola operación."}</p><form id="user-form"><input type="hidden" name="userId" value="${escapeHtml(targetUser?.id || "")}" /><input type="hidden" name="employeeId" value="${escapeHtml(employee?.id || "")}" /><div class="form-row"><label>Usuario<input name="username" autocomplete="off" value="${escapeHtml(username)}" required /></label><label>Contraseña<input name="password" type="password" value="${escapeHtml(password)}" ${isEditing ? 'placeholder="Sin cambios"' : "required"} /></label></div><label>Nombre completo<input name="name" value="${escapeHtml(name)}" required /></label><div class="form-row"><label>Rol del sistema<select name="systemRole" required>${systemRoleSelectOptions(systemRole)}</select></label><label>Rol dentro de la empresa<select name="companyRole" required>${companyRoleSelectOptions(companyRole)}</select></label></div><div class="form-row"><label>Sector<select name="sector">${sectorSelectOptions(sector)}</select></label><label>Turno<select name="turno">${shiftSelectOptions(turno)}</select></label></div><div class="form-row"><label>Piso<select name="piso">${floorSelectOptions(piso)}</select></label><label>Teléfono<input name="phone" value="${escapeHtml(phone)}" /></label></div><div class="week-form-note"><strong>Roles separados</strong><p>El rol del sistema define permisos. El rol dentro de la empresa define la función laboral y cómo aparece en grilla.</p></div><div class="modal-actions"><button type="button" class="button secondary" data-action="close-modal">Cancelar</button><button class="button primary">${isEditing ? "Guardar cambios" : "Guardar usuario"}</button></div></form>`);
+  modal(`<button class="modal-close" data-action="close-modal">×</button><span class="eyebrow">${isEditing ? "EDITAR USUARIO" : "NUEVO USUARIO"}</span><h2>${isEditing ? "Editar usuario" : "Agregar usuario"}</h2><p class="muted">${isEditing ? "Los datos del perfil y el acceso se administran por separado." : "Se crea el acceso a la app con sus datos laborales en una sola operación."}</p><form id="user-form"><input type="hidden" name="userId" value="${escapeHtml(targetUser?.id || "")}" /><input type="hidden" name="employeeId" value="${escapeHtml(employee?.id || "")}" /><div class="form-row"><label>Usuario<input name="username" autocomplete="off" value="${escapeHtml(username)}" required /></label>${isEditing ? "" : `<label>Contraseña inicial<input name="password" type="password" minlength="10" autocomplete="new-password" required /></label>`}</div><label>Nombre completo<input name="name" value="${escapeHtml(name)}" required /></label><div class="form-row"><label>Rol del sistema<select name="systemRole" required>${systemRoleSelectOptions(systemRole)}</select></label><label>Rol dentro de la empresa<select name="companyRole" required>${companyRoleSelectOptions(companyRole)}</select></label></div><div class="form-row"><label>Sector<select name="sector">${sectorSelectOptions(sector)}</select></label><label>Turno<select name="turno">${shiftSelectOptions(turno)}</select></label></div><div class="form-row"><label>Piso<select name="piso">${floorSelectOptions(piso)}</select></label><label>Teléfono<input name="phone" value="${escapeHtml(phone)}" /></label></div><div class="week-form-note"><strong>Roles y acceso separados</strong><p>El rol del sistema define permisos. Para restablecer una contraseña usá la acción específica desde el directorio.</p></div><div class="modal-actions"><button type="button" class="button secondary" data-action="close-modal">Cancelar</button><button class="button primary">${isEditing ? "Guardar cambios" : "Guardar usuario"}</button></div></form>`);
+}
+
+function resetUserPasswordModal(userId) {
+  if (!canManageEmployees(user.role)) return toast("Solo Administración y Encargada pueden restablecer accesos.", "error");
+  const targetUser = state.users.find((item) => item.id === userId);
+  if (!targetUser) return toast("No se encontró el usuario.", "error");
+  modal(`<button class="modal-close" data-action="close-modal">×</button><span class="eyebrow">RESTABLECER ACCESO</span><h2>${escapeHtml(targetUser.name || targetUser.username)}</h2><p class="muted">Definí una contraseña temporal. Se cerrarán sus sesiones y deberá crear una nueva al ingresar.</p><form id="reset-user-password-form"><input type="hidden" name="userId" value="${escapeHtml(targetUser.id)}" /><label>Contraseña temporal<input name="newPassword" type="password" minlength="10" autocomplete="new-password" required autofocus /></label><label>Confirmar contraseña<input name="confirmPassword" type="password" minlength="10" autocomplete="new-password" required /></label><label>Motivo <small class="muted">(opcional, quedará auditado)</small><textarea name="reason" rows="2" maxlength="240" placeholder="Ej.: restablecimiento solicitado por la persona"></textarea></label><div class="week-form-note"><strong>Acción sensible</strong><p>La contraseña no se registra ni se vuelve a mostrar en la aplicación.</p></div><div class="modal-actions"><button type="button" class="button secondary" data-action="close-modal">Cancelar</button><button class="button danger-soft">Restablecer acceso</button></div></form>`);
+}
+
+function forcePasswordChangeModal() {
+  modal(`<span class="eyebrow">SEGURIDAD DE LA CUENTA</span><h2>Creá tu nueva contraseña</h2><p class="muted">Tu acceso fue restablecido. Para continuar necesitás reemplazar la contraseña temporal.</p><form id="force-password-change-form"><label>Contraseña temporal<input name="currentPassword" type="password" autocomplete="current-password" required autofocus /></label><label>Nueva contraseña<input name="newPassword" type="password" minlength="10" autocomplete="new-password" required /></label><label>Confirmar nueva contraseña<input name="confirmPassword" type="password" minlength="10" autocomplete="new-password" required /></label><div class="week-form-note"><strong>Requisito mínimo</strong><p>Usá al menos 10 caracteres. Al guardar se cerrarán las otras sesiones de tu cuenta.</p></div><div class="modal-actions"><button class="button primary">Guardar y continuar</button></div></form>`, "mandatory-modal", "Cambio obligatorio de contraseña");
 }
 
 function newPlanningWeekModal() {
@@ -1507,7 +1538,12 @@ function hasSameDayAssignment(week, position, employeeId) {
 function unreadCount() { return state.notifications.filter((n) => !n.read).length; }
 function empty(message) { return `<div class="empty-state"><span>◇</span><p>${message}</p></div>`; }
 
-async function loginAsDemoUser(match) {
+function waitForPaint() {
+  return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+}
+
+async function loginAsDemoUser(match, options = {}) {
+  const { promptPasswordChange = true } = options;
   user = match;
   sessionStorage.setItem(SESSION_KEY, JSON.stringify(user));
   sessionStorage.removeItem("uzumaki-user-v3");
@@ -1515,8 +1551,9 @@ async function loginAsDemoUser(match) {
   sessionStorage.removeItem("uzumaki-user");
   sessionStorage.removeItem("turnia-user");
   page = "dashboard";
-  state = await loadState();
+  state = match.mustChangePassword ? await loadState({ remote: false }) : await loadState();
   render();
+  if (promptPasswordChange && match.mustChangePassword) forcePasswordChangeModal();
 }
 
 document.addEventListener("submit", async (event) => {
@@ -1530,8 +1567,11 @@ document.addEventListener("submit", async (event) => {
     busyModal("Ingresando", "Estamos validando tu acceso.");
     try {
       const match = await authenticate(username, data.get("password"));
+      await loginAsDemoUser(match, { promptPasswordChange: false });
+      await waitForPaint();
       closeModal();
-      return loginAsDemoUser(match);
+      if (match.mustChangePassword) forcePasswordChangeModal();
+      return undefined;
     } catch (error) {
       closeModal();
       renderLogin("", username);
@@ -1653,6 +1693,7 @@ document.addEventListener("submit", async (event) => {
   if (event.target.id === "user-form") {
     if (!canManageEmployees(user.role)) return toast("Solo una encargada puede crear usuarios.", "error");
     const data = new FormData(event.target);
+    const submit = event.target.querySelector('button[type="submit"], .modal-actions .button.primary');
     const userId = data.get("userId");
     const employeeId = data.get("employeeId");
     const username = data.get("username").trim().toLowerCase();
@@ -1665,11 +1706,45 @@ document.addEventListener("submit", async (event) => {
     const participaEnOperacion = operationalCompanyRoles.includes(companyRole);
     if (!username || (!userId && !password) || !name || !role || !companyRole) return toast("Completá usuario, contraseña, nombre y roles.", "error");
     try {
+      if (submit) submit.disabled = true;
       const payload = { username, password, name, systemRole: role, companyRole, sector, turno, piso: data.get("piso") || null, phone: data.get("phone").trim(), employeeId };
-      await apiCommand(userId ? `/api/users/${encodeURIComponent(userId)}` : "/api/users", payload);
+      if (userId) delete payload.password;
+      await apiCommand(userId ? `/api/users/${encodeURIComponent(userId)}/profile` : "/api/users", payload);
       closeModal();
       toast(userId ? "Usuario actualizado" : "Usuario creado");
+    } catch (error) {
+      if (submit) submit.disabled = false;
+      toast(error.message, "error");
+    }
+  }
+  if (event.target.id === "reset-user-password-form") {
+    const data = new FormData(event.target);
+    const newPassword = String(data.get("newPassword") || "");
+    if (newPassword !== data.get("confirmPassword")) return toast("Las contraseñas no coinciden.", "error");
+    try {
+      await apiCommand(`/api/users/${encodeURIComponent(data.get("userId"))}/reset-password`, { newPassword, reason: String(data.get("reason") || "") });
+      closeModal();
+      toast("Acceso restablecido: deberá cambiar la contraseña al ingresar.");
     } catch (error) { toast(error.message, "error"); }
+  }
+  if (["force-password-change-form", "own-password-change-form"].includes(event.target.id)) {
+    const data = new FormData(event.target);
+    const newPassword = String(data.get("newPassword") || "");
+    if (newPassword !== data.get("confirmPassword")) return toast("Las contraseñas no coinciden.", "error");
+    const submit = event.target.querySelector('button[type="submit"], .modal-actions .button.primary');
+    try {
+      if (submit) submit.disabled = true;
+      await apiCommand("/api/me/change-password", { currentPassword: String(data.get("currentPassword") || ""), newPassword }, "POST", {}, false);
+      user = { ...user, mustChangePassword: false };
+      sessionStorage.setItem(SESSION_KEY, JSON.stringify(user));
+      state = await loadState({ remote: true, requireAuth: true });
+      closeModal();
+      render();
+      toast("Contraseña actualizada. Las demás sesiones se cerraron.");
+    } catch (error) {
+      if (submit) submit.disabled = false;
+      toast(error.message, "error");
+    }
   }
 });
 
@@ -1731,8 +1806,20 @@ document.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-action]"); if (!button) return;
   const action = button.dataset.action;
   if (action === "toggle-password") { const input = document.querySelector('input[name="password"]'); input.type = input.type === "password" ? "text" : "password"; button.textContent = input.type === "password" ? "Ver" : "Ocultar"; }
-  if (action === "confirm-logout" || action === "logout") logoutConfirmationModal();
-  if (action === "close-login-error") { closeModal(); document.querySelector('input[name="password"]')?.focus(); }
+  if (action === "confirm-logout") accountSessionModal();
+  if (action === "open-account-session") { closeModal(); accountSessionModal(); }
+  if (action === "open-own-password-change") { closeModal(); ownPasswordChangeModal(); }
+  if (action === "open-logout-confirmation") { closeModal(); logoutConfirmationModal(); }
+  if (action === "logout") logoutConfirmationModal();
+  if (action === "close-login-error") {
+    closeModal();
+    requestAnimationFrame(() => {
+      const passwordInput = document.querySelector('input[name="password"]');
+      passwordInput?.focus();
+      passwordInput?.select?.();
+    });
+    return;
+  }
   if (action === "perform-logout") {
     closeModal();
     busyModal("Cerrando sesión", "Estamos protegiendo tu sesión.");
@@ -1754,12 +1841,19 @@ document.addEventListener("click", async (event) => {
   if (action === "open-revoke-request") revokeRequestModal(button.dataset.id);
   if (action === "new-user") newUserModal();
   if (action === "edit-user") editUserModal(button.dataset.id);
+  if (action === "reset-user-password") resetUserPasswordModal(button.dataset.id);
   if (action === "create-user-for-employee") createUserForEmployeeModal(button.dataset.employeeId);
   if (action === "delete-user") {
     const targetUser = state.users.find((item) => item.id === button.dataset.id);
     if (!targetUser) return toast("No se encontró el usuario.", "error");
     if (!confirm(`¿Desactivar el acceso de ${targetUser.username}? Se conservará el historial.`)) return;
     try { await apiCommand(`/api/users/${encodeURIComponent(targetUser.id)}/deactivate`, {}); toast("Acceso desactivado"); } catch (error) { toast(error.message, "error"); }
+  }
+  if (action === "reactivate-user") {
+    const targetUser = state.users.find((item) => item.id === button.dataset.id);
+    if (!targetUser) return toast("No se encontró el usuario.", "error");
+    if (!confirm(`¿Reactivar el acceso de ${targetUser.username}?`)) return;
+    try { await apiCommand(`/api/users/${encodeURIComponent(targetUser.id)}/reactivate`, {}); toast("Acceso reactivado"); } catch (error) { toast(error.message, "error"); }
   }
   if (action === "new-planning-week" && canEditSchedule(user.role)) newPlanningWeekModal();
   if (action === "open-planning-library") { planningView = "library"; render(); }
@@ -1800,7 +1894,11 @@ document.addEventListener("click", async (event) => {
   if (action === "pause-planning-week") pausePlanningWeek();
   if (action === "draft-planning-week") draftPlanningWeek();
   if (action === "delete-planning-week") deletePlanningWeek();
-  if (action === "close-modal") { if (event.target === button || button.classList.contains("modal-close") || button.tagName === "BUTTON") closeModal(); }
+  if (action === "close-modal") {
+    if (document.querySelector(".busy-modal-backdrop")) return;
+    if (document.querySelector(".mandatory-modal-backdrop")) return;
+    if (event.target === button || button.classList.contains("modal-close") || button.tagName === "BUTTON") closeModal();
+  }
   if (action === "filter-request") { requestFilter = button.dataset.filter; render(); }
   if (action === "partner-resolve") {
     const request = state.requests.find((r) => r.id === button.dataset.id);
@@ -1875,7 +1973,7 @@ document.addEventListener("click", async (event) => {
 document.addEventListener("keydown", (event) => {
   const backdrop = document.querySelector(".modal-backdrop");
   if (!backdrop) return;
-  if (event.key === "Escape" && !backdrop.classList.contains("busy-modal-backdrop")) {
+  if (event.key === "Escape" && !backdrop.classList.contains("busy-modal-backdrop") && !backdrop.classList.contains("mandatory-modal-backdrop")) {
     event.preventDefault();
     closeModal();
     return;
@@ -1890,3 +1988,4 @@ document.addEventListener("keydown", (event) => {
 });
 
 render();
+if (user?.mustChangePassword) forcePasswordChangeModal();
