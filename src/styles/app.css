@@ -69,6 +69,7 @@ h1, h2, h3, .brand strong { font-family: "Manrope", sans-serif; }
 .nav-item:hover { color: white; background: rgba(255,255,255,.06); }
 .nav-item.active { color: var(--uzumaki-brown-900); background: var(--uzumaki-yellow-400); font-weight: 700; box-shadow: 0 5px 14px rgb(79 54 46 / .14); }
 .nav-icon { width: 22px; flex: 0 0 22px; font-size: 18px; text-align: center; }
+.nav-icon svg, .icon-button svg { display: block; width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2; }
 .nav-label { overflow: hidden; min-width: 0; text-overflow: ellipsis; white-space: nowrap; transition: opacity .2s ease, transform .2s cubic-bezier(.2, .8, .2, 1); }
 .nav-item b { display: grid; width: 21px; height: 21px; margin-left: auto; place-items: center; border-radius: 50%; color: white; background: var(--uzumaki-orange-500); font-size: 12px; }
 .sidebar-foot { position: relative; display: grid; grid-template-columns: 34px 1fr auto; align-items: center; gap: 9px; margin-top: auto; padding: 14px 7px 0; border-top: 1px solid rgba(255,255,255,.1); transition: grid-template-columns .2s cubic-bezier(.2, .8, .2, 1), gap .2s ease, padding .2s cubic-bezier(.2, .8, .2, 1); }
