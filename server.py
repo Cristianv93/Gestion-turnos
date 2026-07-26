@@ -624,4 +624,11 @@ if __name__ == "__main__":
         log_event("database_configured", provider="postgresql", source="DATABASE_URL")
     else:
         log_event("json_fallback_enabled", path=str(DB_PATH))
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        log_event("server_stopped", reason="keyboard_interrupt")
+    finally:
+        server.server_close()
+        if POSTGRES:
+            POSTGRES.close()

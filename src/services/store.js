@@ -1,5 +1,6 @@
 // Railway/PostgreSQL es la fuente de datos. No se importan datos de ejemplo
 // al navegador, para que no queden expuestos como un módulo estático público.
+import { csrfHeaders, requestApi } from "./api.js";
 const DAYS = [];
 const initialUsers = [];
 const employees = [];
@@ -21,16 +22,10 @@ const LEGACY_KEYS = ["uzumaki-mvp-state-v4", "uzumaki-mvp-state-v3", "uzumaki-mv
 // La aplicación ya no inicia leyendo una copia global de la base. El backend
 // entrega un bootstrap acotado al rol autenticado.
 const API_BOOTSTRAP_URL = "/api/bootstrap";
-const CSRF_COOKIE = "uzumaki_csrf";
 let saveQueue = Promise.resolve();
 export const STATE_STORAGE_LABEL = "PostgreSQL";
 export const STATE_FILE_NAME = "gestion-turnos-export.json";
 export const canPersistStateFile = () => window.location.protocol.startsWith("http");
-const csrfToken = () => document.cookie.split(";").map((item) => item.trim()).find((item) => item.startsWith(`${CSRF_COOKIE}=`))?.slice(CSRF_COOKIE.length + 1) || "";
-export const csrfHeaders = () => {
-  const token = csrfToken();
-  return token ? { "X-CSRF-Token": token } : {};
-};
 export function clearCachedState() {
   localStorage.removeItem(KEY);
   LEGACY_KEYS.forEach((key) => localStorage.removeItem(key));
@@ -184,35 +179,18 @@ const removeCredentials = (state) => {
   return state;
 };
 
-export async function authenticate(username, password) {
-  if (!canPersistStateFile()) throw new Error("Abrí la app desde server.py para iniciar sesión.");
-  const response = await fetch("/api/auth/login", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, password }),
-  });
-  const result = await response.json();
-  if (!response.ok) throw new Error(result.message || "No se pudo iniciar sesión.");
-  return result.user;
-}
-
-export async function endSession() {
-  if (!canPersistStateFile()) return;
-  const response = await fetch("/api/auth/logout", { method: "POST", headers: csrfHeaders() });
-  if (!response.ok && response.status !== 401) throw new Error("No se pudo cerrar la sesión.");
-}
-
 async function loadStateFromApi(options = {}) {
   if (!options.remote || !window.location.protocol.startsWith("http")) return null;
-  const response = await fetch(API_BOOTSTRAP_URL, { cache: "no-store" });
-  if (response.status === 404) return null;
-  if (response.status === 401) {
-    const error = new Error("La sesión venció. Volvé a iniciar sesión.");
-    error.code = "authenticationRequired";
+  try {
+    return removeCredentials(normalizeState(await requestApi(API_BOOTSTRAP_URL)));
+  } catch (error) {
+    if (error.status === 404) return null;
+    if (error.status === 401) {
+      error.message = "La sesión venció. Volvé a iniciar sesión.";
+      error.code = "authenticationRequired";
+    }
     throw error;
   }
-  if (!response.ok) throw new Error("No se pudo cargar la información inicial.");
-  return removeCredentials(normalizeState(await response.json()));
 }
 
 export async function loadState(options = { remote: true }) {

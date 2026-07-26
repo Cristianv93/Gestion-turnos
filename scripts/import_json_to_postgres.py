@@ -1,7 +1,7 @@
 """Importa data/uzumaki-db.json en PostgreSQL.
 
 Uso:
-  DATABASE_URL='postgresql://...' python scripts/import_json_to_postgres.py
+  DATABASE_URL='[URL_DE_POSTGRES]' python scripts/import_json_to_postgres.py
 
 Ejecutar antes:
   psql "$DATABASE_URL" -f migrations/001_initial_schema.sql

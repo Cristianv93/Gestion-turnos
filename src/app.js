@@ -1,4 +1,7 @@
-import { authenticate, clearCachedState, csrfHeaders, endSession, hydrateStateFromJson, loadState, resetState, saveState, serializeState, STATE_FILE_NAME, STATE_STORAGE_LABEL } from "./services/store.js?v=20260726-04";
+import { clearCachedState, hydrateStateFromJson, loadState, resetState, saveState, serializeState, STATE_FILE_NAME, STATE_STORAGE_LABEL } from "./services/store.js?v=20260726-05";
+import { authenticate, endSession, requestApi } from "./services/api.js?v=20260726-01";
+import { showToast } from "./ui/feedback.js?v=20260726-01";
+import { closeModal as closeModalUi, openModal } from "./ui/modal.js?v=20260726-01";
 import { canEditApplications, canEditSchedule, canManageEmployees, canResolveRequests, canSeeAudit, isAdminRole, roleLabel } from "./services/permissions.js?v=20260712-3";
 import { createDraftPlanningWeek, ensureKitchenPlanningSlots } from "./services/planningWeeks.js?v=20260716-1";
 import { applyApprovedAbsenceOrLeave, applyApprovedShiftChange, applyGustavoJulioException, buildDailyDaysOffSummary, buildWeeklyAvailabilityMap, generateFloorCoverageAssignments, generateHabitualAssignments, generateKitchenMorningCollaborationAssignments } from "./services/planningEngine.js?v=20260717-6";
@@ -29,7 +32,6 @@ let selectedPlanningWeekIds = new Set();
 let sidebarCollapsed = sessionStorage.getItem("uzumaki-sidebar-collapsed") === "true";
 let employeeSearch = "";
 let requestFilter = "all";
-let modalReturnFocus = null;
 let planningFocusedEmployeeId = null;
 
 const icons = {
@@ -85,13 +87,7 @@ const exceptionTypes = {
 };
 
 function toast(message, tone = "success") {
-  const node = document.createElement("div");
-  node.className = `toast ${tone}`;
-  node.setAttribute("role", tone === "error" ? "alert" : "status");
-  node.setAttribute("aria-live", tone === "error" ? "assertive" : "polite");
-  node.textContent = message;
-  toastRegion.append(node);
-  setTimeout(() => node.remove(), 3200);
+  showToast(toastRegion, message, tone);
 }
 
 function audit(action, entity, result) {
@@ -137,13 +133,11 @@ function applyApiFragment(result) {
 // y responde con el recurso actualizado; nunca se vuelve a descargar el
 // estado completo después de una acción.
 async function apiCommand(path, payload = null, method = "POST", extraHeaders = {}, reloadState = true) {
-  const response = await fetch(path, {
+  const result = await requestApi(path, {
     method,
-    headers: { "Content-Type": "application/json", ...csrfHeaders(), ...extraHeaders },
-    body: payload === null ? undefined : JSON.stringify(payload),
+    payload: payload === null ? undefined : payload,
+    headers: extraHeaders,
   });
-  const result = await response.json();
-  if (!response.ok) throw new Error(result.message || "No se pudo completar la operación.");
   if (reloadState) {
     applyApiFragment(result);
     render();
@@ -989,9 +983,7 @@ async function openStoredPlanningWeek(weekId) {
   if (!stored || !canEditSchedule(user.role)) return toast("No se encontró la grilla almacenada.", "error");
   if (state.planningWeek && state.planningWeek.id !== weekId && planningWeekHasUnsavedChanges(state.planningWeek) && !confirm("La grilla actual tiene cambios sin guardar en el historial. ¿Abrir otra grilla de todos modos?")) return;
   try {
-    const response = await fetch(`/api/planning/weeks/${encodeURIComponent(weekId)}`, { cache: "no-store" });
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.message || "No se pudo abrir la grilla.");
+    const result = await requestApi(`/api/planning/weeks/${encodeURIComponent(weekId)}`);
     applyApiFragment(result);
     planningView = "editor";
     render();
@@ -1224,17 +1216,11 @@ function auditPage() {
 }
 
 function modal(content, variant = "", label = "Diálogo") {
-  modalReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  document.body.classList.add("modal-open");
-  document.body.insertAdjacentHTML("beforeend", `<div class="modal-backdrop ${variant ? `${variant}-backdrop` : ""}" data-action="close-modal"><section class="modal ${variant}" role="dialog" aria-modal="true" aria-label="${escapeHtml(label)}">${content}</section></div>`);
-  requestAnimationFrame(() => document.querySelector(".modal-backdrop .modal [autofocus], .modal-backdrop .modal button, .modal-backdrop .modal input")?.focus());
+  openModal(content, variant, label, escapeHtml);
 }
 
 function closeModal() {
-  document.querySelector(".modal-backdrop")?.remove();
-  document.body.classList.remove("modal-open");
-  modalReturnFocus?.focus?.();
-  modalReturnFocus = null;
+  closeModalUi();
 }
 
 function busyModal(title, message) {

@@ -9,10 +9,12 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
+import logging
 import os
 import secrets
+from time import perf_counter
 
-import psycopg
+from psycopg_pool import ConnectionPool
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from planning_rules import cycle_day_off
@@ -21,6 +23,7 @@ from planning_rules import cycle_day_off
 ROLE_TO_SYSTEM = {"admin": "sys-admin", "manager": "sys-encargada", "supervisor": "sys-supervisora", "staff": "sys-personal"}
 SYSTEM_TO_ROLE = {value: key for key, value in ROLE_TO_SYSTEM.items()}
 MANAGER_ROLES = {"admin", "manager"}
+LOGGER = logging.getLogger("uzumaki.database")
 
 
 class DomainError(Exception):
@@ -40,12 +43,43 @@ def iso(value):
 class Database:
     def __init__(self, url):
         self.url = url
+        self.pool_timeout = float(os.environ.get("DATABASE_POOL_TIMEOUT_SECONDS", "5"))
+        self.pool = ConnectionPool(
+            conninfo=url,
+            min_size=max(1, int(os.environ.get("DATABASE_POOL_MIN_SIZE", "1"))),
+            max_size=max(2, int(os.environ.get("DATABASE_POOL_MAX_SIZE", "8"))),
+            timeout=self.pool_timeout,
+            max_idle=float(os.environ.get("DATABASE_POOL_MAX_IDLE_SECONDS", "300")),
+            kwargs={"row_factory": dict_row, "connect_timeout": 5},
+            open=True,
+            name="gestion-turnos-postgres",
+        )
 
     @contextmanager
     def cursor(self):
-        with psycopg.connect(self.url, row_factory=dict_row, connect_timeout=5) as conn:
-            with conn.cursor() as cur:
-                yield conn, cur
+        started_at = perf_counter()
+        try:
+            with self.pool.connection(timeout=self.pool_timeout) as conn:
+                with conn.cursor() as cur:
+                    yield conn, cur
+        finally:
+            # Es útil para Railway: permite separar tiempo de base de datos del
+            # resto de la respuesta sin registrar SQL ni datos sensibles.
+            LOGGER.info(
+                "database_cursor %s",
+                json.dumps(
+                    {
+                        "duration_ms": round((perf_counter() - started_at) * 1000, 1),
+                        "pool": self.pool.get_stats(),
+                    },
+                    default=str,
+                    separators=(",", ":"),
+                ),
+            )
+
+    def close(self):
+        """Libera conexiones y workers al detener el proceso localmente."""
+        self.pool.close(timeout=5.0)
 
     def ready(self):
         with self.cursor() as (_, cur):
@@ -208,19 +242,22 @@ class Database:
                 raise DomainError("Semana inexistente o no disponible.", 404, "notFound")
             return self._week_dto(cur, week)
 
+    def _week_summaries(self, cur, actor):
+        if actor.get("role") in MANAGER_ROLES:
+            cur.execute("""SELECT w.*, count(DISTINCT a.id) assignment_count, count(DISTINCT p.id) position_count
+                FROM planning_weeks w LEFT JOIN planning_positions p ON p.planning_week_id=w.id
+                LEFT JOIN planning_assignments a ON a.planning_week_id=w.id
+                GROUP BY w.id ORDER BY w.start_date DESC""")
+        else:
+            cur.execute("""SELECT w.*, count(DISTINCT a.id) assignment_count, count(DISTINCT p.id) position_count
+                FROM planning_weeks w LEFT JOIN planning_positions p ON p.planning_week_id=w.id
+                LEFT JOIN planning_assignments a ON a.planning_week_id=w.id WHERE w.status='published'
+                GROUP BY w.id ORDER BY w.start_date DESC LIMIT 8""")
+        return [self._week_summary(row, row["assignment_count"], row["position_count"]) for row in cur.fetchall()]
+
     def week_summaries(self, actor):
         with self.cursor() as (_, cur):
-            if actor.get("role") in MANAGER_ROLES:
-                cur.execute("""SELECT w.*, count(DISTINCT a.id) assignment_count, count(DISTINCT p.id) position_count
-                    FROM planning_weeks w LEFT JOIN planning_positions p ON p.planning_week_id=w.id
-                    LEFT JOIN planning_assignments a ON a.planning_week_id=w.id
-                    GROUP BY w.id ORDER BY w.start_date DESC""")
-            else:
-                cur.execute("""SELECT w.*, count(DISTINCT a.id) assignment_count, count(DISTINCT p.id) position_count
-                    FROM planning_weeks w LEFT JOIN planning_positions p ON p.planning_week_id=w.id
-                    LEFT JOIN planning_assignments a ON a.planning_week_id=w.id WHERE w.status='published'
-                    GROUP BY w.id ORDER BY w.start_date DESC LIMIT 8""")
-            return [self._week_summary(row, row["assignment_count"], row["position_count"]) for row in cur.fetchall()]
+            return self._week_summaries(cur, actor)
 
     def bootstrap(self, actor):
         """Estado inicial acotado para la aplicación autenticada."""
@@ -245,7 +282,9 @@ class Database:
                 cur.execute("SELECT id,action,entity_id,result,metadata,created_at FROM audit_logs ORDER BY created_at DESC LIMIT 100")
                 audit_logs = [{**(row["metadata"] or {}),"id":row["id"],"action":row["action"],"entity":row["entity_id"],"result":row["result"],"time":iso(row["created_at"])} for row in cur.fetchall()]
             catalogs = self._catalogs(cur) if privileged else {"sectores":{},"turnos":{},"pisos":{},"rolesOperativos":{},"rolesSistema":{}}
-        summaries = self.week_summaries(actor)
+            # Se mantiene en la misma conexión: antes este paso abría una
+            # segunda conexión remota durante cada carga inicial.
+            summaries = self._week_summaries(cur, actor)
         return {"stateRevision":planning_week["version"] if planning_week else 0,"stateUpdatedAt":None,"employees":employees,"users":users,"catalogs":catalogs,"weeklySchedules":summaries,"planningWeek":planning_week,"requests":requests,"notifications":notifications,"auditLogs":audit_logs,"incidents":[],"schedule":[],"draft":[],"days":[],"scheduleVersion":0,"hasDraftChanges":False}
 
     def dashboard(self, actor):
