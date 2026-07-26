@@ -1,4 +1,7 @@
-import { authenticate, clearCachedState, csrfHeaders, endSession, hydrateStateFromJson, loadState, resetState, saveState, serializeState, STATE_FILE_NAME, STATE_STORAGE_LABEL } from "./services/store.js?v=20260726-03";
+import { clearCachedState, hydrateStateFromJson, loadState, resetState, saveState, serializeState, STATE_FILE_NAME, STATE_STORAGE_LABEL } from "./services/store.js?v=20260726-05";
+import { authenticate, endSession, requestApi } from "./services/api.js?v=20260726-01";
+import { showToast } from "./ui/feedback.js?v=20260726-01";
+import { closeModal as closeModalUi, openModal } from "./ui/modal.js?v=20260726-01";
 import { canEditApplications, canEditSchedule, canManageEmployees, canResolveRequests, canSeeAudit, isAdminRole, roleLabel } from "./services/permissions.js?v=20260712-3";
 import { createDraftPlanningWeek, ensureKitchenPlanningSlots } from "./services/planningWeeks.js?v=20260716-1";
 import { applyApprovedAbsenceOrLeave, applyApprovedShiftChange, applyGustavoJulioException, buildDailyDaysOffSummary, buildWeeklyAvailabilityMap, generateFloorCoverageAssignments, generateHabitualAssignments, generateKitchenMorningCollaborationAssignments } from "./services/planningEngine.js?v=20260717-6";
@@ -29,7 +32,6 @@ let selectedPlanningWeekIds = new Set();
 let sidebarCollapsed = sessionStorage.getItem("uzumaki-sidebar-collapsed") === "true";
 let employeeSearch = "";
 let requestFilter = "all";
-let modalReturnFocus = null;
 let planningFocusedEmployeeId = null;
 
 const icons = {
@@ -85,13 +87,7 @@ const exceptionTypes = {
 };
 
 function toast(message, tone = "success") {
-  const node = document.createElement("div");
-  node.className = `toast ${tone}`;
-  node.setAttribute("role", tone === "error" ? "alert" : "status");
-  node.setAttribute("aria-live", tone === "error" ? "assertive" : "polite");
-  node.textContent = message;
-  toastRegion.append(node);
-  setTimeout(() => node.remove(), 3200);
+  showToast(toastRegion, message, tone);
 }
 
 function audit(action, entity, result) {
@@ -110,19 +106,40 @@ async function persist(options = {}) {
   }
 }
 
-// Los cambios operativos se envían como comandos pequeños al backend. La base
-// valida permisos, disponibilidad y la versión de la semana; luego se relee el
-// estado canónico. El navegador deja de ser dueño de la planificación.
+function applyApiFragment(result) {
+  if (!result || typeof result !== "object") return;
+  if (result.week) {
+    state.planningWeek = result.week;
+    const index = (state.weeklySchedules || []).findIndex((week) => week.id === result.week.id);
+    if (index >= 0) state.weeklySchedules[index] = result.week;
+    else state.weeklySchedules = [result.week, ...(state.weeklySchedules || [])];
+  }
+  if (result.deletedWeekId) {
+    state.weeklySchedules = (state.weeklySchedules || []).filter((week) => week.id !== result.deletedWeekId);
+    if (state.planningWeek?.id === result.deletedWeekId) state.planningWeek = null;
+  }
+  if (result.request) {
+    const index = (state.requests || []).findIndex((request) => request.id === result.request.id);
+    if (index >= 0) state.requests[index] = result.request;
+    else state.requests = [result.request, ...(state.requests || [])];
+  }
+  if (Array.isArray(result.notifications)) state.notifications = result.notifications;
+  if (Array.isArray(result.employees)) state.employees = result.employees;
+  if (Array.isArray(result.users)) state.users = result.users;
+  if (result.catalogs) state.catalogs = result.catalogs;
+}
+
+// Los cambios operativos se envían como comandos pequeños. El backend valida
+// y responde con el recurso actualizado; nunca se vuelve a descargar el
+// estado completo después de una acción.
 async function apiCommand(path, payload = null, method = "POST", extraHeaders = {}, reloadState = true) {
-  const response = await fetch(path, {
+  const result = await requestApi(path, {
     method,
-    headers: { "Content-Type": "application/json", ...csrfHeaders(), ...extraHeaders },
-    body: payload === null ? undefined : JSON.stringify(payload),
+    payload: payload === null ? undefined : payload,
+    headers: extraHeaders,
   });
-  const result = await response.json();
-  if (!response.ok) throw new Error(result.message || "No se pudo completar la operación.");
   if (reloadState) {
-    state = await loadState({ remote: true, requireAuth: true });
+    applyApiFragment(result);
     render();
   }
   return result;
@@ -517,6 +534,9 @@ function planningSnapshots() {
 function planningWeekHasUnsavedChanges(week) {
   const stored = (state.weeklySchedules || []).find((item) => item.id === week?.id);
   if (!week || !stored) return Boolean(week);
+  // El bootstrap conserva el historial como resúmenes. Un resumen no puede
+  // usarse para decidir si la grilla abierta fue modificada localmente.
+  if (!Array.isArray(stored.operationalPositions)) return false;
   return JSON.stringify(week) !== JSON.stringify(stored);
 }
 
@@ -535,8 +555,8 @@ function planningLibraryPage() {
 }
 
 function planningLibraryItem(week) {
-  const assigned = (week.assignments || []).length;
-  const total = (week.operationalPositions || []).length;
+  const assigned = Number.isInteger(week.assignmentCount) ? week.assignmentCount : (week.assignments || []).length;
+  const total = Number.isInteger(week.positionCount) ? week.positionCount : (week.operationalPositions || []).length;
   const isCurrent = state.planningWeek?.id === week.id;
   const isSelected = selectedPlanningWeekIds.has(week.id);
   return `<article class="planning-library-item ${isCurrent ? "current" : ""} ${isSelected ? "selected" : ""}">
@@ -958,13 +978,18 @@ function persistPlanningWeekLifecycle(week, options = {}) {
   return persist(options);
 }
 
-function openStoredPlanningWeek(weekId) {
+async function openStoredPlanningWeek(weekId) {
   const stored = planningSnapshots().find((week) => week.id === weekId);
   if (!stored || !canEditSchedule(user.role)) return toast("No se encontró la grilla almacenada.", "error");
   if (state.planningWeek && state.planningWeek.id !== weekId && planningWeekHasUnsavedChanges(state.planningWeek) && !confirm("La grilla actual tiene cambios sin guardar en el historial. ¿Abrir otra grilla de todos modos?")) return;
-  state.planningWeek = structuredClone(stored);
-  planningView = "editor";
-  render();
+  try {
+    const result = await requestApi(`/api/planning/weeks/${encodeURIComponent(weekId)}`);
+    applyApiFragment(result);
+    planningView = "editor";
+    render();
+  } catch (error) {
+    toast(error.message || "No se pudo abrir la grilla.", "error");
+  }
 }
 
 function generatePlanningProposal() {
@@ -1191,17 +1216,11 @@ function auditPage() {
 }
 
 function modal(content, variant = "", label = "Diálogo") {
-  modalReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  document.body.classList.add("modal-open");
-  document.body.insertAdjacentHTML("beforeend", `<div class="modal-backdrop ${variant ? `${variant}-backdrop` : ""}" data-action="close-modal"><section class="modal ${variant}" role="dialog" aria-modal="true" aria-label="${escapeHtml(label)}">${content}</section></div>`);
-  requestAnimationFrame(() => document.querySelector(".modal-backdrop .modal [autofocus], .modal-backdrop .modal button, .modal-backdrop .modal input")?.focus());
+  openModal(content, variant, label, escapeHtml);
 }
 
 function closeModal() {
-  document.querySelector(".modal-backdrop")?.remove();
-  document.body.classList.remove("modal-open");
-  modalReturnFocus?.focus?.();
-  modalReturnFocus = null;
+  closeModalUi();
 }
 
 function busyModal(title, message) {
@@ -1738,7 +1757,6 @@ document.addEventListener("submit", async (event) => {
       await apiCommand("/api/me/change-password", { currentPassword: String(data.get("currentPassword") || ""), newPassword }, "POST", {}, false);
       user = { ...user, mustChangePassword: false };
       sessionStorage.setItem(SESSION_KEY, JSON.stringify(user));
-      state = await loadState({ remote: true, requireAuth: true });
       closeModal();
       render();
       toast("Contraseña actualizada. Las demás sesiones se cerraron.");

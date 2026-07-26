@@ -9,10 +9,12 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
+import logging
 import os
 import secrets
+from time import perf_counter
 
-import psycopg
+from psycopg_pool import ConnectionPool
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from planning_rules import cycle_day_off
@@ -21,6 +23,7 @@ from planning_rules import cycle_day_off
 ROLE_TO_SYSTEM = {"admin": "sys-admin", "manager": "sys-encargada", "supervisor": "sys-supervisora", "staff": "sys-personal"}
 SYSTEM_TO_ROLE = {value: key for key, value in ROLE_TO_SYSTEM.items()}
 MANAGER_ROLES = {"admin", "manager"}
+LOGGER = logging.getLogger("uzumaki.database")
 
 
 class DomainError(Exception):
@@ -40,12 +43,43 @@ def iso(value):
 class Database:
     def __init__(self, url):
         self.url = url
+        self.pool_timeout = float(os.environ.get("DATABASE_POOL_TIMEOUT_SECONDS", "5"))
+        self.pool = ConnectionPool(
+            conninfo=url,
+            min_size=max(1, int(os.environ.get("DATABASE_POOL_MIN_SIZE", "1"))),
+            max_size=max(2, int(os.environ.get("DATABASE_POOL_MAX_SIZE", "8"))),
+            timeout=self.pool_timeout,
+            max_idle=float(os.environ.get("DATABASE_POOL_MAX_IDLE_SECONDS", "300")),
+            kwargs={"row_factory": dict_row, "connect_timeout": 5},
+            open=True,
+            name="gestion-turnos-postgres",
+        )
 
     @contextmanager
     def cursor(self):
-        with psycopg.connect(self.url, row_factory=dict_row, connect_timeout=5) as conn:
-            with conn.cursor() as cur:
-                yield conn, cur
+        started_at = perf_counter()
+        try:
+            with self.pool.connection(timeout=self.pool_timeout) as conn:
+                with conn.cursor() as cur:
+                    yield conn, cur
+        finally:
+            # Es útil para Railway: permite separar tiempo de base de datos del
+            # resto de la respuesta sin registrar SQL ni datos sensibles.
+            LOGGER.info(
+                "database_cursor %s",
+                json.dumps(
+                    {
+                        "duration_ms": round((perf_counter() - started_at) * 1000, 1),
+                        "pool": self.pool.get_stats(),
+                    },
+                    default=str,
+                    separators=(",", ":"),
+                ),
+            )
+
+    def close(self):
+        """Libera conexiones y workers al detener el proceso localmente."""
+        self.pool.close(timeout=5.0)
 
     def ready(self):
         with self.cursor() as (_, cur):
@@ -163,6 +197,138 @@ class Database:
             catalogs=self._catalogs(cur)
         active=next((w for w in weeks if w["status"] in {"draft","published","paused"}), None)
         return {"stateRevision": active["version"] if active else 0, "stateUpdatedAt":None, "employees":employees,"users":users,"catalogs":catalogs,"weeklySchedules":weeks,"planningWeek":active,"requests":requests,"notifications":notifications,"auditLogs":audit_logs,"incidents":[],"schedule":[],"draft":[],"days":[],"scheduleVersion":0,"hasDraftChanges":False}
+
+    # Lecturas de la API. A diferencia de state(), estos métodos no recorren
+    # todas las semanas ni construyen una grilla completa que la pantalla no va
+    # a utilizar. state() se conserva solamente como compatibilidad temporal.
+    def _employees_dto(self, cur, privileged=False):
+        cur.execute("""SELECT e.id,e.name,e.initials,e.phone,e.status,e.participates_in_operation,e.habitual_position_template_id,
+            cr.id role_id,cr.name role,s.id sector_id,s.name sector,sh.id shift_id,sh.name turno,f.number piso,fc.anchor_date,fc.anchor_type,fc.cycle_length_days,e.legacy_data
+            FROM employees e LEFT JOIN company_roles cr ON cr.id=e.company_role_id LEFT JOIN sectors s ON s.id=e.sector_id
+            LEFT JOIN shifts sh ON sh.id=e.shift_id LEFT JOIN floors f ON f.id=e.floor_id
+            LEFT JOIN employee_franco_cycles fc ON fc.employee_id=e.id ORDER BY e.name""")
+        employees = []
+        for row in cur.fetchall():
+            item = {"id":row["id"],"name":row["name"],"initials":row["initials"],"status":row["status"],"participaEnOperacion":row["participates_in_operation"],"roleId":row["role_id"],"role":row["role"],"sectorId":row["sector_id"],"sector":row["sector"],"turnoId":row["shift_id"],"turno":row["turno"],"piso":row["piso"]}
+            if privileged:
+                item.update({**(row["legacy_data"] or {}),"phone":row["phone"],"habitualPositionTemplateId":row["habitual_position_template_id"],"francoCycle":{"anchorDate":row["anchor_date"].isoformat(),"anchorType":row["anchor_type"],"cycleLengthDays":row["cycle_length_days"]} if row["anchor_date"] else None})
+            employees.append(item)
+        return employees
+
+    def _requests_dto(self, cur, actor):
+        if actor.get("role") in MANAGER_ROLES:
+            cur.execute("SELECT * FROM requests ORDER BY created_at DESC")
+        else:
+            cur.execute("SELECT * FROM requests WHERE employee_id=%s OR partner_employee_id=%s ORDER BY created_at DESC", (actor.get("employeeId"), actor.get("employeeId")))
+        return [{"id":r["id"],"employeeId":r["employee_id"],"type":r["type"],"status":r["status"],"partnerEmployeeId":r["partner_employee_id"] or "","partnerStatus":r["partner_status"] or "","note":r["note"],"targetDate":r["target_date"].isoformat() if r["target_date"] else None,"startDate":r["start_date"].isoformat() if r["start_date"] else None,"endDate":r["end_date"].isoformat() if r["end_date"] else None,"scheduleImpact":r["schedule_impact"] or {},"date":iso(r["created_at"]),"revokedAt":iso(r["revoked_at"])} for r in cur.fetchall()]
+
+    def _notifications_dto(self, cur, actor):
+        cur.execute("""SELECT n.id,n.title,n.text,n.type,n.read_at,n.created_at FROM notifications n
+                       WHERE n.recipient_user_id IS NULL OR n.recipient_user_id=%s ORDER BY n.created_at DESC LIMIT 100""", (actor["id"],))
+        return [{"id":r["id"],"title":r["title"],"text":r["text"],"type":r["type"],"read":bool(r["read_at"]),"time":iso(r["created_at"])} for r in cur.fetchall()]
+
+    @staticmethod
+    def _week_summary(row, assignment_count=0, position_count=0):
+        return {"id":row["id"],"name":row["name"],"startDate":row["start_date"].isoformat(),"endDate":row["end_date"].isoformat(),"status":row["status"],"version":row["version"],"publishedAt":iso(row["published_at"]),"assignmentCount":assignment_count,"positionCount":position_count}
+
+    def week(self, actor, week_id):
+        with self.cursor() as (_, cur):
+            if actor.get("role") in MANAGER_ROLES:
+                cur.execute("SELECT * FROM planning_weeks WHERE id=%s", (week_id,))
+            else:
+                cur.execute("SELECT * FROM planning_weeks WHERE id=%s AND status='published'", (week_id,))
+            week = cur.fetchone()
+            if not week:
+                raise DomainError("Semana inexistente o no disponible.", 404, "notFound")
+            return self._week_dto(cur, week)
+
+    def _week_summaries(self, cur, actor):
+        if actor.get("role") in MANAGER_ROLES:
+            cur.execute("""SELECT w.*, count(DISTINCT a.id) assignment_count, count(DISTINCT p.id) position_count
+                FROM planning_weeks w LEFT JOIN planning_positions p ON p.planning_week_id=w.id
+                LEFT JOIN planning_assignments a ON a.planning_week_id=w.id
+                GROUP BY w.id ORDER BY w.start_date DESC""")
+        else:
+            cur.execute("""SELECT w.*, count(DISTINCT a.id) assignment_count, count(DISTINCT p.id) position_count
+                FROM planning_weeks w LEFT JOIN planning_positions p ON p.planning_week_id=w.id
+                LEFT JOIN planning_assignments a ON a.planning_week_id=w.id WHERE w.status='published'
+                GROUP BY w.id ORDER BY w.start_date DESC LIMIT 8""")
+        return [self._week_summary(row, row["assignment_count"], row["position_count"]) for row in cur.fetchall()]
+
+    def week_summaries(self, actor):
+        with self.cursor() as (_, cur):
+            return self._week_summaries(cur, actor)
+
+    def bootstrap(self, actor):
+        """Estado inicial acotado para la aplicación autenticada."""
+        privileged = actor.get("role") in MANAGER_ROLES
+        with self.cursor() as (_, cur):
+            employees = self._employees_dto(cur, privileged)
+            if privileged:
+                cur.execute("SELECT id,username,name,system_role,employee_id,active,must_change_password FROM users ORDER BY active DESC,username")
+            else:
+                cur.execute("SELECT id,username,name,system_role,employee_id,active,must_change_password FROM users WHERE id=%s AND active=TRUE", (actor["id"],))
+            users = [self.user_dto(row) | ({"active":bool(row["active"])} if privileged else {}) for row in cur.fetchall()]
+            if privileged:
+                cur.execute("SELECT * FROM planning_weeks WHERE status IN ('draft','published','paused') ORDER BY start_date DESC LIMIT 1")
+            else:
+                cur.execute("SELECT * FROM planning_weeks WHERE status='published' ORDER BY start_date DESC LIMIT 1")
+            active = cur.fetchone()
+            planning_week = self._week_dto(cur, active) if active else None
+            requests = self._requests_dto(cur, actor)
+            notifications = self._notifications_dto(cur, actor)
+            audit_logs = []
+            if privileged:
+                cur.execute("SELECT id,action,entity_id,result,metadata,created_at FROM audit_logs ORDER BY created_at DESC LIMIT 100")
+                audit_logs = [{**(row["metadata"] or {}),"id":row["id"],"action":row["action"],"entity":row["entity_id"],"result":row["result"],"time":iso(row["created_at"])} for row in cur.fetchall()]
+            catalogs = self._catalogs(cur) if privileged else {"sectores":{},"turnos":{},"pisos":{},"rolesOperativos":{},"rolesSistema":{}}
+            # Se mantiene en la misma conexión: antes este paso abría una
+            # segunda conexión remota durante cada carga inicial.
+            summaries = self._week_summaries(cur, actor)
+        return {"stateRevision":planning_week["version"] if planning_week else 0,"stateUpdatedAt":None,"employees":employees,"users":users,"catalogs":catalogs,"weeklySchedules":summaries,"planningWeek":planning_week,"requests":requests,"notifications":notifications,"auditLogs":audit_logs,"incidents":[],"schedule":[],"draft":[],"days":[],"scheduleVersion":0,"hasDraftChanges":False}
+
+    def dashboard(self, actor):
+        """Datos mínimos del inicio; no carga personal, usuarios ni auditoría."""
+        with self.cursor() as (_, cur):
+            if actor.get("role") in MANAGER_ROLES:
+                cur.execute("SELECT * FROM planning_weeks WHERE status IN ('draft','published','paused') ORDER BY start_date DESC LIMIT 1")
+            else:
+                cur.execute("SELECT * FROM planning_weeks WHERE status='published' ORDER BY start_date DESC LIMIT 1")
+            active = cur.fetchone()
+            planning_week = self._week_dto(cur, active) if active else None
+            requests = self._requests_dto(cur, actor)
+            notifications = self._notifications_dto(cur, actor)
+            if actor.get("role") in MANAGER_ROLES:
+                cur.execute("SELECT count(*) total, count(*) FILTER (WHERE status='active' AND participates_in_operation=TRUE) operational FROM employees")
+                metrics = cur.fetchone()
+            else:
+                cur.execute("SELECT count(*) assigned FROM planning_assignments WHERE planning_week_id=%s AND employee_id=%s", (active["id"] if active else None, actor.get("employeeId")))
+                metrics = cur.fetchone()
+        return {"planningWeek":planning_week,"requests":requests,"notifications":notifications,"metrics":metrics}
+
+    def employees_data(self, actor):
+        self._assert_manager(actor)
+        with self.cursor() as (_, cur):
+            employees = self._employees_dto(cur, True)
+            cur.execute("SELECT id,username,name,system_role,employee_id,active,must_change_password FROM users ORDER BY active DESC,username")
+            users = [self.user_dto(row) | {"active":bool(row["active"])} for row in cur.fetchall()]
+            catalogs = self._catalogs(cur)
+        return {"employees":employees,"users":users,"catalogs":catalogs}
+
+    def requests_data(self, actor):
+        with self.cursor() as (_, cur):
+            return {"requests":self._requests_dto(cur, actor)}
+
+    def notifications_data(self, actor):
+        with self.cursor() as (_, cur):
+            return {"notifications":self._notifications_dto(cur, actor)}
+
+    def request_data(self, actor, request_id):
+        data = self.requests_data(actor)["requests"]
+        request = next((item for item in data if item["id"] == request_id), None)
+        if not request:
+            raise DomainError("La solicitud no existe o no está disponible.", 404, "notFound")
+        return request
 
     def _assert_manager(self, actor):
         if actor.get("role") not in MANAGER_ROLES:
@@ -365,6 +531,10 @@ class Database:
             if not week: raise DomainError("Semana inexistente.",404,"notFound")
             if expected_version is not None and expected_version != week["version"]: raise DomainError("La semana fue modificada por otra persona.",409,"versionConflict")
             if not (week["start_date"] <= date.fromisoformat(day) <= week["end_date"]): raise DomainError("La fecha no pertenece a la semana.")
+            cur.execute("SELECT id FROM employees WHERE id=%s AND status='active' AND participates_in_operation=TRUE", (employee_id,))
+            if not cur.fetchone(): raise DomainError("La persona indicada no está activa para la operación.", 409, "unavailable")
+            cur.execute("SELECT 1 FROM planning_assignments WHERE planning_week_id=%s AND employee_id=%s AND assignment_date=%s", (week_id, employee_id, day))
+            if cur.fetchone(): raise DomainError("No se puede cargar un franco sobre una asignación existente.", 409, "duplicateAssignment")
             cur.execute("INSERT INTO planning_days_off (id,planning_week_id,employee_id,date,sector_id,type,created_by) VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (planning_week_id,employee_id,date) DO UPDATE SET type=EXCLUDED.type,sector_id=EXCLUDED.sector_id",(secrets.token_hex(16),week_id,employee_id,day,sector_id,kind,actor["id"]))
             cur.execute("UPDATE planning_weeks SET version=version+1,updated_at=now() WHERE id=%s RETURNING version",(week_id,)); version=cur.fetchone()["version"]
             self._audit(cur, actor["id"], "set_manual_day_off", "planning_day_off", employee_id, metadata={"weekId": week_id, "date": day, "type": kind})
@@ -391,6 +561,7 @@ class Database:
                     position_id = f"{week_id}:{current.isoformat()}:{template['id']}"
                     cur.execute("""INSERT INTO planning_positions (id,planning_week_id,template_id,date,day_index,sector_id,shift_id,floor_id,slot,label,optional)
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", (position_id,week_id,template["id"],current,day_index,template["sector_id"],template["shift_id"],template["floor_id"],template["slot"],template["label"],template["optional"]))
+            self._audit(cur, actor["id"], "created_planning_week", "planning_week", week_id, metadata={"startDate": start.isoformat(), "name": name})
             conn.commit()
         return {"id": week_id, "startDate": start.isoformat(), "endDate": (start + timedelta(days=6)).isoformat(), "version": 1}
 
@@ -435,6 +606,7 @@ class Database:
             cur.execute("DELETE FROM planning_days_off WHERE id=%s AND planning_week_id=%s RETURNING id",(day_off_id,week_id))
             if not cur.fetchone(): raise DomainError("No se encontró el franco.",404,"notFound")
             cur.execute("UPDATE planning_weeks SET version=version+1,updated_at=now() WHERE id=%s RETURNING version",(week_id,)); version=cur.fetchone()["version"]
+            self._audit(cur, actor["id"], "removed_manual_day_off", "planning_day_off", day_off_id, metadata={"weekId": week_id})
             conn.commit()
         return {"ok":True,"version":version}
 
@@ -448,12 +620,21 @@ class Database:
             cur.execute("SELECT id,date,shift_id,sector_id FROM planning_positions WHERE id=%s AND planning_week_id=%s",(data.get("positionId"),week_id)); position=cur.fetchone()
             if not position: raise DomainError("El puesto no pertenece a esta semana.")
             if data.get("type") not in {"leave","studyLeave","absence","dayOffChange","doubleShift","replacement","uncovered"}: raise DomainError("Tipo de excepción inválido.")
+            affected_id, cover_id = data.get("affectedEmployeeId") or None, data.get("coverEmployeeId") or None
+            if affected_id and cover_id and affected_id == cover_id:
+                raise DomainError("La persona afectada y la cobertura deben ser distintas.", 409, "invalidCoverage")
+            if cover_id:
+                cur.execute("SELECT id FROM employees WHERE id=%s AND status='active' AND participates_in_operation=TRUE", (cover_id,))
+                if not cur.fetchone(): raise DomainError("La persona de cobertura no está disponible.", 409, "unavailable")
+                cur.execute("SELECT 1 FROM planning_assignments WHERE planning_week_id=%s AND employee_id=%s AND assignment_date=%s", (week_id, cover_id, position["date"]))
+                if cur.fetchone(): raise DomainError("La persona de cobertura ya tiene una asignación ese día.", 409, "duplicateAssignment")
             cur.execute("""INSERT INTO planning_exceptions (id,planning_week_id,position_id,date,shift_id,sector_id,affected_employee_id,cover_employee_id,type,note,created_by,updated_by)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT (id) DO UPDATE SET position_id=EXCLUDED.position_id,date=EXCLUDED.date,shift_id=EXCLUDED.shift_id,sector_id=EXCLUDED.sector_id,
                   affected_employee_id=EXCLUDED.affected_employee_id,cover_employee_id=EXCLUDED.cover_employee_id,type=EXCLUDED.type,note=EXCLUDED.note,updated_by=EXCLUDED.updated_by,updated_at=now()""",
-                (exception_id,week_id,position["id"],position["date"],position["shift_id"],position["sector_id"],data.get("affectedEmployeeId") or None,data.get("coverEmployeeId") or None,data["type"],str(data.get("note") or ""),actor["id"],actor["id"]))
+                (exception_id,week_id,position["id"],position["date"],position["shift_id"],position["sector_id"],affected_id,cover_id,data["type"],str(data.get("note") or ""),actor["id"],actor["id"]))
             cur.execute("UPDATE planning_weeks SET version=version+1,updated_at=now() WHERE id=%s RETURNING version",(week_id,)); version=cur.fetchone()["version"]
+            self._audit(cur, actor["id"], "upserted_planning_exception", "planning_exception", exception_id, metadata={"weekId": week_id, "type": data["type"]})
             conn.commit()
         return {"ok":True,"id":exception_id,"version":version}
 
@@ -466,6 +647,7 @@ class Database:
             cur.execute("DELETE FROM planning_exceptions WHERE id=%s AND planning_week_id=%s RETURNING id",(exception_id,week_id))
             if not cur.fetchone(): raise DomainError("No se encontró la excepción.",404,"notFound")
             cur.execute("UPDATE planning_weeks SET version=version+1,updated_at=now() WHERE id=%s RETURNING version",(week_id,)); version=cur.fetchone()["version"]
+            self._audit(cur, actor["id"], "removed_planning_exception", "planning_exception", exception_id, metadata={"weekId": week_id})
             conn.commit()
         return {"ok":True,"version":version}
 
@@ -488,6 +670,7 @@ class Database:
             cur.execute("""UPDATE requests SET status=%s,partner_status=%s,updated_at=now()
                 WHERE id=%s AND partner_employee_id=%s AND status='pendingPartner' RETURNING id""", ("pendingManager" if status=="partnerAccepted" else status, "accepted" if status=="partnerAccepted" else "rejected", request_id,actor.get("employeeId")))
             if not cur.fetchone(): raise DomainError("No podés resolver esta solicitud.",403,"forbidden")
+            self._audit(cur, actor["id"], "resolved_partner_request", "request", request_id, result=status)
             conn.commit()
         return {"ok":True,"status":"pendingManager" if status=="partnerAccepted" else status}
 
@@ -522,6 +705,7 @@ class Database:
         with self.cursor() as (conn,cur):
             cur.execute("UPDATE requests SET status=%s,resolved_at=now(),resolved_by=%s,updated_at=now() WHERE id=%s AND status IN ('pendingManager','pendingPartner','partnerAccepted') RETURNING id",(status,actor["id"],request_id))
             if not cur.fetchone(): raise DomainError("La solicitud no existe o ya fue resuelta.",404,"notFound")
+            self._audit(cur, actor["id"], "resolved_request", "request", request_id, result=status)
             conn.commit()
         return {"ok":True,"status":status}
 

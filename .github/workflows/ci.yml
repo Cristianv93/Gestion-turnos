@@ -13,11 +13,20 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - run: python -m pip install -r requirements.txt
       - run: python -m py_compile server.py database.py planning_rules.py scripts/*.py
       - run: python scripts/validate_migrations.py
       - run: python -m unittest discover -s tests
+      - name: Check frontend syntax
+        run: |
+          node --check src/app.js
+          node --check src/services/api.js
+          node --check src/services/store.js
+          node --check src/ui/feedback.js
+          node --check src/ui/modal.js
       - run: git diff --check
       - name: Check for committed secrets
-        run: |
-          ! git grep -nEI '(postgres(ql)?://[^C]|BEGIN (RSA|OPENSSH) PRIVATE KEY|AWS_SECRET_ACCESS_KEY)' -- ':!.env.example'
+        run: python scripts/check_secrets.py

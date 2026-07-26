@@ -240,6 +240,21 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    @staticmethod
+    def _with_week(result, session, week_id):
+        """Devuelve el comando y sólo la semana que cambió."""
+        return {**result, "week": POSTGRES.week(session, week_id)}
+
+    @staticmethod
+    def _with_request(result, session, request_id):
+        """Devuelve el comando y sólo la solicitud que cambió."""
+        return {**result, "request": POSTGRES.request_data(session, request_id)}
+
+    @staticmethod
+    def _with_people(result, session):
+        """La administración necesita refrescar únicamente personal y accesos."""
+        return {**result, **POSTGRES.employees_data(session)}
+
     def _read_json_body(self):
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -322,7 +337,7 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
             except Exception:
                 LOGGER.exception("readiness_failed")
                 return self._send_json(503, {"ok": False, "storage": "postgresql"})
-        if path == "/api/state":
+        if path in {"/api/bootstrap", "/api/state"}:
             session = self._require_session()
             if not session:
                 return
@@ -330,9 +345,12 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
                 return self._send_json(403, {"error": "passwordChangeRequired", "message": "Debés cambiar tu contraseña antes de continuar."})
             if POSTGRES:
                 try:
-                    payload = POSTGRES.state(session)
+                    # /api/state queda como alias de transición. Las sesiones
+                    # nuevas usan el bootstrap acotado, sin recorrer todo el
+                    # historial de semanas y sus posiciones.
+                    payload = POSTGRES.bootstrap(session)
                 except Exception:
-                    LOGGER.exception("state_read_failed")
+                    LOGGER.exception("bootstrap_read_failed")
                     return self._send_json(503, {"error": "databaseUnavailable", "message": "No se pudo leer PostgreSQL."})
                 return self._send_json(200, payload)
             if not DB_PATH.exists():
@@ -355,28 +373,22 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
             if not POSTGRES:
                 return self._send_json(503, {"error": "postgresRequired", "message": "PostgreSQL debe estar configurado."})
             try:
-                # Contratos de lectura específicos. El frontend puede migrar cada
-                # pantalla progresivamente sin volver a escribir estado global.
-                snapshot = POSTGRES.state(session)
-            except Exception:
-                LOGGER.exception("api_read_failed path=%s", path)
-                return self._send_json(503, {"error": "databaseUnavailable", "message": "No se pudo leer PostgreSQL."})
-            try:
                 if path == "/api/dashboard":
-                    return self._send_json(200, {"planningWeek": snapshot["planningWeek"], "weeklySchedules": snapshot["weeklySchedules"], "requests": snapshot["requests"], "notifications": snapshot["notifications"]})
+                    return self._send_json(200, POSTGRES.dashboard(session))
                 if path == "/api/employees":
-                    return self._send_json(200, {"employees": snapshot["employees"], "users": snapshot["users"], "catalogs": snapshot["catalogs"]})
+                    return self._send_json(200, POSTGRES.employees_data(session))
                 if path == "/api/requests":
-                    return self._send_json(200, {"requests": snapshot["requests"]})
-                if path == "/api/notifications":
-                    return self._send_json(200, {"notifications": snapshot["notifications"]})
+                    return self._send_json(200, POSTGRES.requests_data(session))
                 if path.startswith("/api/planning/weeks/"):
                     week_id = path.split("/")[4]
-                    week = next((item for item in snapshot["weeklySchedules"] if item["id"] == week_id), None)
-                    return self._send_json(200, {"week": week} if week else {"error": "notFound", "message": "Semana inexistente."}) if week else self._send_json(404, {"error": "notFound", "message": "Semana inexistente."})
-            except KeyError:
+                    return self._send_json(200, {"week": POSTGRES.week(session, week_id)})
+                if path == "/api/notifications":
+                    return self._send_json(200, POSTGRES.notifications_data(session))
+            except DomainError as error:
+                return self._send_json(error.status, {"error": error.code, "message": error.message})
+            except Exception:
                 LOGGER.exception("api_contract_failed path=%s", path)
-                return self._send_json(500, {"error": "internalError", "message": "No se pudo preparar la respuesta."})
+                return self._send_json(503, {"error": "databaseUnavailable", "message": "No se pudo preparar la respuesta."})
         # Nunca exponer la base de datos, el código del servidor ni archivos del repositorio.
         if path.startswith("/src/data/") or (path not in PUBLIC_PATHS and not path.startswith(PUBLIC_PATH_PREFIXES)):
             return self._send_json(404, {"error": "Recurso no encontrado"})
@@ -455,32 +467,38 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
                     raise DomainError("JSON inválido.")
                 log_event("operation_started", actor=session["id"], method="POST", path=path)
                 if path == "/api/planning/assignments":
-                    result = POSTGRES.assign(session, body.get("weekId"), body.get("positionId"), body.get("employeeId"), body.get("version")); log_event("planning_assignment_saved", actor=session["id"], week_id=body.get("weekId"), position_id=body.get("positionId"), employee_id=body.get("employeeId")); return self._send_json(200, result)
+                    result = POSTGRES.assign(session, body.get("weekId"), body.get("positionId"), body.get("employeeId"), body.get("version")); log_event("planning_assignment_saved", actor=session["id"], week_id=body.get("weekId"), position_id=body.get("positionId"), employee_id=body.get("employeeId")); return self._send_json(200, self._with_week(result, session, body.get("weekId")))
                 if path == "/api/planning/weeks":
-                    return self._send_json(201, POSTGRES.create_week(session, body.get("name"), body.get("startDate")))
+                    result = POSTGRES.create_week(session, body.get("name"), body.get("startDate"))
+                    return self._send_json(201, self._with_week(result, session, result["id"]))
                 if path == "/api/planning/days-off":
-                    return self._send_json(200, POSTGRES.add_day_off(session, body.get("weekId"), body.get("employeeId"), body.get("date"), body.get("sectorId"), body.get("type"), body.get("version")))
+                    result = POSTGRES.add_day_off(session, body.get("weekId"), body.get("employeeId"), body.get("date"), body.get("sectorId"), body.get("type"), body.get("version"))
+                    return self._send_json(200, self._with_week(result, session, body.get("weekId")))
                 if path == "/api/planning/exceptions":
-                    return self._send_json(200, POSTGRES.upsert_exception(session, body.get("weekId"), body, body.get("version")))
+                    result = POSTGRES.upsert_exception(session, body.get("weekId"), body, body.get("version"))
+                    return self._send_json(200, self._with_week(result, session, body.get("weekId")))
                 if path.startswith("/api/planning/weeks/") and path.endswith("/status"):
-                    return self._send_json(200, POSTGRES.set_week_status(session, path.split("/")[4], body.get("status"), body.get("version")))
+                    week_id = path.split("/")[4]
+                    return self._send_json(200, self._with_week(POSTGRES.set_week_status(session, week_id, body.get("status"), body.get("version")), session, week_id))
                 if path == "/api/requests":
-                    return self._send_json(201, POSTGRES.create_request(session, body))
+                    result = POSTGRES.create_request(session, body)
+                    return self._send_json(201, self._with_request(result, session, result["id"]))
                 if path.startswith("/api/requests/") and path.endswith("/resolve"):
                     request_id = path.split("/")[3]
-                    return self._send_json(200, POSTGRES.resolve_request(session, request_id, body.get("status")))
+                    return self._send_json(200, self._with_request(POSTGRES.resolve_request(session, request_id, body.get("status")), session, request_id))
                 if path.startswith("/api/requests/") and path.endswith("/partner-response"):
                     request_id = path.split("/")[3]
-                    return self._send_json(200, POSTGRES.resolve_partner_request(session, request_id, body.get("status")))
+                    return self._send_json(200, self._with_request(POSTGRES.resolve_partner_request(session, request_id, body.get("status")), session, request_id))
                 if path.startswith("/api/requests/") and path.endswith("/revoke"):
                     request_id = path.split("/")[3]
-                    return self._send_json(200, POSTGRES.revoke_request(session, request_id, body.get("reason")))
+                    return self._send_json(200, self._with_request(POSTGRES.revoke_request(session, request_id, body.get("reason")), session, request_id))
                 if path == "/api/notifications/read":
-                    return self._send_json(200, POSTGRES.mark_notifications_read(session, body.get("notificationId")))
+                    result = POSTGRES.mark_notifications_read(session, body.get("notificationId"))
+                    return self._send_json(200, {**result, **POSTGRES.notifications_data(session)})
                 if path == "/api/users":
                     password = str(body.get("password") or "")
                     validate_new_password(password)
-                    return self._send_json(201, POSTGRES.upsert_user(session, body, password_hash(password) if password else None))
+                    return self._send_json(201, self._with_people(POSTGRES.upsert_user(session, body, password_hash(password) if password else None), session))
                 if path == "/api/me/change-password":
                     current_password = str(body.get("currentPassword") or "")
                     new_password = str(body.get("newPassword") or "")
@@ -489,16 +507,16 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
                 if path.startswith("/api/users/") and path.endswith("/reset-password"):
                     new_password = str(body.get("newPassword") or "")
                     validate_new_password(new_password)
-                    return self._send_json(200, POSTGRES.reset_user_password(session, path.split("/")[3], password_hash(new_password), str(body.get("reason") or "")))
+                    return self._send_json(200, self._with_people(POSTGRES.reset_user_password(session, path.split("/")[3], password_hash(new_password), str(body.get("reason") or "")), session))
                 if path.startswith("/api/users/") and path.endswith("/deactivate"):
-                    return self._send_json(200, POSTGRES.deactivate_user(session, path.split("/")[3]))
+                    return self._send_json(200, self._with_people(POSTGRES.deactivate_user(session, path.split("/")[3]), session))
                 if path.startswith("/api/users/") and path.endswith("/reactivate"):
-                    return self._send_json(200, POSTGRES.reactivate_user(session, path.split("/")[3]))
+                    return self._send_json(200, self._with_people(POSTGRES.reactivate_user(session, path.split("/")[3]), session))
                 if path.startswith("/api/users/") and path.endswith("/profile"):
                     if body.get("password"):
                         raise DomainError("La contraseña se administra desde el restablecimiento de acceso.")
                     body["userId"] = path.split("/")[3]
-                    return self._send_json(200, POSTGRES.upsert_user(session, body))
+                    return self._send_json(200, self._with_people(POSTGRES.upsert_user(session, body), session))
             except DomainError as error:
                 log_event("domain_rejected", actor=session.get("id"), path=path, code=error.code, reason=error.message)
                 return self._send_json(error.status, {"error": error.code, "message": error.message})
@@ -521,13 +539,16 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
             version = self.headers.get("If-Match")
             expected_version = int(version) if version else None
             if path.startswith("/api/planning/assignments/"):
-                return self._send_json(200, POSTGRES.remove_assignment(session, self.headers.get("X-Week-Id"), path.split("/")[4], expected_version))
+                week_id = self.headers.get("X-Week-Id")
+                return self._send_json(200, self._with_week(POSTGRES.remove_assignment(session, week_id, path.split("/")[4], expected_version), session, week_id))
             if path.startswith("/api/planning/days-off/"):
-                return self._send_json(200, POSTGRES.remove_day_off(session, self.headers.get("X-Week-Id"), path.split("/")[4], expected_version))
+                week_id = self.headers.get("X-Week-Id")
+                return self._send_json(200, self._with_week(POSTGRES.remove_day_off(session, week_id, path.split("/")[4], expected_version), session, week_id))
             if path.startswith("/api/planning/exceptions/"):
-                return self._send_json(200, POSTGRES.remove_exception(session, self.headers.get("X-Week-Id"), path.split("/")[4], expected_version))
+                week_id = self.headers.get("X-Week-Id")
+                return self._send_json(200, self._with_week(POSTGRES.remove_exception(session, week_id, path.split("/")[4], expected_version), session, week_id))
             if path.startswith("/api/planning/weeks/"):
-                return self._send_json(200, POSTGRES.delete_week(session, path.split("/")[4], expected_version))
+                return self._send_json(200, {**POSTGRES.delete_week(session, path.split("/")[4], expected_version), "deletedWeekId": path.split("/")[4]})
         except DomainError as error:
             log_event("domain_rejected", actor=session.get("id"), path=path, code=error.code, reason=error.message)
             return self._send_json(error.status, {"error": error.code, "message": error.message})
@@ -603,4 +624,11 @@ if __name__ == "__main__":
         log_event("database_configured", provider="postgresql", source="DATABASE_URL")
     else:
         log_event("json_fallback_enabled", path=str(DB_PATH))
-    server.serve_forever()
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        log_event("server_stopped", reason="keyboard_interrupt")
+    finally:
+        server.server_close()
+        if POSTGRES:
+            POSTGRES.close()
