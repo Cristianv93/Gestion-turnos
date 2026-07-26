@@ -1,4 +1,4 @@
-import { authenticate, endSession, hydrateStateFromJson, loadState, resetState, saveState, serializeState, STATE_FILE_NAME } from "./services/store.js?v=20260717-2";
+import { authenticate, endSession, hydrateStateFromJson, loadState, resetState, saveState, serializeState, STATE_FILE_NAME, STATE_STORAGE_LABEL } from "./services/store.js?v=20260726-03";
 import { canEditApplications, canEditSchedule, canManageEmployees, canResolveRequests, canSeeAudit, isAdminRole, roleLabel } from "./services/permissions.js?v=20260712-3";
 import { createDraftPlanningWeek, ensureKitchenPlanningSlots } from "./services/planningWeeks.js?v=20260716-1";
 import { applyApprovedAbsenceOrLeave, applyApprovedShiftChange, applyGustavoJulioException, buildDailyDaysOffSummary, buildWeeklyAvailabilityMap, generateFloorCoverageAssignments, generateHabitualAssignments, generateKitchenMorningCollaborationAssignments, revokePlanningApplication } from "./services/planningEngine.js?v=20260717-6";
@@ -502,7 +502,7 @@ function planningLibraryPage() {
   const selectedCount = selectedPlanningWeekIds.size;
   return `${pageHeading("PLANIFICACIÓN SEMANAL", "Grillas almacenadas", "Consultá semanas anteriores, retomá un borrador o creá una nueva planificación.", canCreate ? `<button class="button primary" data-action="new-planning-week">${icons.plus} Nueva grilla</button>` : "")}
     <section class="planning-library" aria-label="Grillas guardadas">
-      <div class="planning-library-head"><div><span class="eyebrow">HISTORIAL</span><h2>${weeks.length ? `${weeks.length} grillas guardadas` : "Todavía no hay grillas guardadas"}</h2></div><span class="planning-library-file">${STATE_FILE_NAME}</span></div>
+      <div class="planning-library-head"><div><span class="eyebrow">HISTORIAL</span><h2>${weeks.length ? `${weeks.length} grillas guardadas` : "Todavía no hay grillas guardadas"}</h2></div><span class="planning-library-file">${STATE_STORAGE_LABEL}</span></div>
       ${selectedCount ? `<div class="planning-library-selection"><span><b>${selectedCount}</b> ${selectedCount === 1 ? "grilla seleccionada" : "grillas seleccionadas"}</span><div><button class="button secondary" data-action="clear-planning-week-selection">Limpiar</button><button class="button danger-soft" data-action="delete-selected-planning-weeks">Eliminar seleccionadas</button></div></div>` : ""}
       ${weeks.length ? `<div class="planning-library-list">${weeks.map(planningLibraryItem).join("")}</div>` : empty("Guardá una planificación para que quede disponible aquí.")}
     </section>`;
@@ -930,12 +930,12 @@ async function savePlanningWeekToJson() {
   if (!week || !canEditSchedule(user.role)) return;
   week.savedAt = new Date().toISOString();
   week.savedBy = { id: user.id || user.username, name: user.name, role: user.role };
-  audit("Guardó una planificación", week.name, STATE_FILE_NAME);
+  audit("Guardó una planificación", week.name, STATE_STORAGE_LABEL);
   try {
     await persistPlanningWeekLifecycle(week, { requireFile: true });
-    toast(`Planificación guardada en ${STATE_FILE_NAME}`);
+    toast(`Planificación guardada en ${STATE_STORAGE_LABEL}`);
   } catch (error) {
-    toast(error.message || `No se pudo guardar en ${STATE_FILE_NAME}`, "error");
+    toast(error.message || `No se pudo guardar en ${STATE_STORAGE_LABEL}`, "error");
   }
 }
 

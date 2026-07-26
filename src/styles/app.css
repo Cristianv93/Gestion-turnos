@@ -776,4 +776,31 @@ h1, h2, h3, .brand strong { font-family: "Manrope", sans-serif; }
   .planning-position-grid.planning-days-off-grid .planning-day-off-button {
     min-height: 100px;
   }
+  .planning-position-grid.planning-days-off-grid {
+    grid-template-columns: clamp(42px, 13vw, 58px) repeat(7, minmax(0, 1fr));
+  }
+  .planning-days-off-grid .planning-position-row-label {
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
+    padding: 4px 1px;
+    text-align: center;
+  }
+  .planning-days-off-grid .planning-position-row-label strong {
+    overflow: hidden;
+    font-size: clamp(7px, 2.1vw, 9px);
+    letter-spacing: -.04em;
+    line-height: 1;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .planning-days-off-grid .planning-position-day span,
+  .planning-days-off-grid .planning-position-day strong {
+    overflow: hidden;
+    font-size: clamp(7px, 2.15vw, 9px);
+    letter-spacing: -.03em;
+    line-height: 1;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 }
