@@ -21,7 +21,8 @@ const LEGACY_KEYS = ["uzumaki-mvp-state-v4", "uzumaki-mvp-state-v3", "uzumaki-mv
 const API_STATE_URL = "/api/state";
 const CSRF_COOKIE = "uzumaki_csrf";
 let saveQueue = Promise.resolve();
-export const STATE_FILE_NAME = "uzumaki-db.json";
+export const STATE_STORAGE_LABEL = "PostgreSQL";
+export const STATE_FILE_NAME = "gestion-turnos-export.json";
 export const canPersistStateFile = () => window.location.protocol.startsWith("http");
 const csrfToken = () => document.cookie.split(";").map((item) => item.trim()).find((item) => item.startsWith(`${CSRF_COOKIE}=`))?.slice(CSRF_COOKIE.length + 1) || "";
 export const csrfHeaders = () => {
@@ -243,7 +244,7 @@ async function persistState(state, options = {}) {
     removeCredentials(state);
     localStorage.setItem(KEY, JSON.stringify(state));
     if (options.requireFile) {
-      throw new Error(`Para guardar en ${STATE_FILE_NAME}, abrí la app desde server.py y no como archivo local.`);
+      throw new Error(`Para guardar en ${STATE_STORAGE_LABEL}, abrí la app desde server.py y no como archivo local.`);
     }
     return { local: true, file: false };
   }
@@ -260,7 +261,7 @@ async function persistState(state, options = {}) {
       conflict.currentRevision = details.currentRevision;
       throw conflict;
     }
-    if (!response.ok) throw new Error(`No se pudo escribir ${STATE_FILE_NAME}.`);
+    if (!response.ok) throw new Error(`No se pudo escribir ${STATE_STORAGE_LABEL}.`);
     const result = await response.json();
     state.stateRevision = result.stateRevision;
     state.stateUpdatedAt = result.stateUpdatedAt;

@@ -52,6 +52,8 @@ LOGIN_WINDOW_SECONDS = int(os.environ.get("LOGIN_WINDOW_SECONDS", "900"))
 PUBLIC_PATH_PREFIXES = ("/src/", "/assets/")
 PUBLIC_PATHS = {"/", "/index.html"}
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+FAVICON_SVG = b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#fb6f01"/><path d="M18 17h28v8H18zm0 14h28v8H18zm0 14h20v8H18z" fill="#fff"/></svg>"""
+CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -131,7 +133,15 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
     def handle_one_request(self):
         self._request_started_at = perf_counter()
         self._request_id = secrets.token_hex(8)
-        return super().handle_one_request()
+        try:
+            return super().handle_one_request()
+        except CLIENT_DISCONNECT_ERRORS:
+            log_event("client_disconnected", method=getattr(self, "command", None),
+                      path=self._path() if hasattr(self, "path") else None,
+                      remote=self._client_ip(),
+                      actor=getattr(self, "_actor_id", None),
+                      request_id=getattr(self, "_request_id", None))
+            return None
 
     def log_message(self, format, *args):
         # Reemplaza el formato ruidoso del servidor estándar por un evento útil.
@@ -224,6 +234,12 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_no_content(self):
+        self.send_response(204)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def _read_json_body(self):
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -286,6 +302,16 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         path = self._path()
+        if path == "/.well-known/appspecific/com.chrome.devtools.json":
+            return self._send_no_content()
+        if path == "/favicon.ico":
+            self.send_response(200)
+            self.send_header("Content-Type", "image/svg+xml")
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.send_header("Content-Length", str(len(FAVICON_SVG)))
+            self.end_headers()
+            self.wfile.write(FAVICON_SVG)
+            return
         if path == "/health":
             return self._send_json(200, {"ok": True, "service": "gestion-turnos"})
         if path == "/ready":
@@ -304,10 +330,11 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
                 return self._send_json(403, {"error": "passwordChangeRequired", "message": "Debés cambiar tu contraseña antes de continuar."})
             if POSTGRES:
                 try:
-                    return self._send_json(200, POSTGRES.state(session))
+                    payload = POSTGRES.state(session)
                 except Exception:
                     LOGGER.exception("state_read_failed")
                     return self._send_json(503, {"error": "databaseUnavailable", "message": "No se pudo leer PostgreSQL."})
+                return self._send_json(200, payload)
             if not DB_PATH.exists():
                 return self._send_json(404, {"error": "Base JSON no creada"})
             try:
@@ -331,6 +358,10 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
                 # Contratos de lectura específicos. El frontend puede migrar cada
                 # pantalla progresivamente sin volver a escribir estado global.
                 snapshot = POSTGRES.state(session)
+            except Exception:
+                LOGGER.exception("api_read_failed path=%s", path)
+                return self._send_json(503, {"error": "databaseUnavailable", "message": "No se pudo leer PostgreSQL."})
+            try:
                 if path == "/api/dashboard":
                     return self._send_json(200, {"planningWeek": snapshot["planningWeek"], "weeklySchedules": snapshot["weeklySchedules"], "requests": snapshot["requests"], "notifications": snapshot["notifications"]})
                 if path == "/api/employees":
@@ -343,9 +374,9 @@ class UzumakiHandler(SimpleHTTPRequestHandler):
                     week_id = path.split("/")[4]
                     week = next((item for item in snapshot["weeklySchedules"] if item["id"] == week_id), None)
                     return self._send_json(200, {"week": week} if week else {"error": "notFound", "message": "Semana inexistente."}) if week else self._send_json(404, {"error": "notFound", "message": "Semana inexistente."})
-            except Exception:
-                LOGGER.exception("api_read_failed path=%s", path)
-                return self._send_json(503, {"error": "databaseUnavailable", "message": "No se pudo leer PostgreSQL."})
+            except KeyError:
+                LOGGER.exception("api_contract_failed path=%s", path)
+                return self._send_json(500, {"error": "internalError", "message": "No se pudo preparar la respuesta."})
         # Nunca exponer la base de datos, el código del servidor ni archivos del repositorio.
         if path.startswith("/src/data/") or (path not in PUBLIC_PATHS and not path.startswith(PUBLIC_PATH_PREFIXES)):
             return self._send_json(404, {"error": "Recurso no encontrado"})
