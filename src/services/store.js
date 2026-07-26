@@ -18,7 +18,9 @@ const weeklySchedules = [];
 
 const KEY = "uzumaki-mvp-state-v5";
 const LEGACY_KEYS = ["uzumaki-mvp-state-v4", "uzumaki-mvp-state-v3", "uzumaki-mvp-state-v2", "uzumaki-mvp-state-v1", "turnia-mvp-state-v1"];
-const API_STATE_URL = "/api/state";
+// La aplicación ya no inicia leyendo una copia global de la base. El backend
+// entrega un bootstrap acotado al rol autenticado.
+const API_BOOTSTRAP_URL = "/api/bootstrap";
 const CSRF_COOKIE = "uzumaki_csrf";
 let saveQueue = Promise.resolve();
 export const STATE_STORAGE_LABEL = "PostgreSQL";
@@ -202,14 +204,14 @@ export async function endSession() {
 
 async function loadStateFromApi(options = {}) {
   if (!options.remote || !window.location.protocol.startsWith("http")) return null;
-  const response = await fetch(API_STATE_URL, { cache: "no-store" });
+  const response = await fetch(API_BOOTSTRAP_URL, { cache: "no-store" });
   if (response.status === 404) return null;
   if (response.status === 401) {
     const error = new Error("La sesión venció. Volvé a iniciar sesión.");
     error.code = "authenticationRequired";
     throw error;
   }
-  if (!response.ok) throw new Error("No se pudo cargar la base JSON.");
+  if (!response.ok) throw new Error("No se pudo cargar la información inicial.");
   return removeCredentials(normalizeState(await response.json()));
 }
 
@@ -249,7 +251,7 @@ async function persistState(state, options = {}) {
     return { local: true, file: false };
   }
   try {
-    const response = await fetch(API_STATE_URL, {
+    const response = await fetch("/api/state", {
       method: "PUT",
       headers: { "Content-Type": "application/json", ...csrfHeaders() },
       body: JSON.stringify(state),
